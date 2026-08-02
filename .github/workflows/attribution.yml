@@ -1,0 +1,307 @@
+name: Attribution
+
+# Strips AI-attribution trailers from PR commit messages, then fails the check
+# if any attribution credit remains (commits, title, or body).
+#
+# Why this exists
+# ---------------
+# Local commit hooks cannot cover server-side commits. GitHub composes
+# "Commit suggestion", "Apply suggestion" and Copilot Autofix commits on the
+# server, so no local `git commit` runs and no local hook fires. A trailer
+# added that way is invisible until someone reads the commit list, and once it
+# is merged and tagged it cannot be removed — a tag pins history permanently.
+# Before merge is the only window where the fix is cheap.
+#
+# Two controls, one workflow
+# --------------------------
+# 1. strip-attribution.py rewrites removable trailer / footer lines on the PR
+#    branch (same-repo PRs only) and force-with-lease pushes the cleaned tip.
+# 2. check-attribution.py fails the job if any attribution credit remains —
+#    including PR title/body and mid-subject prose the stripper will not touch.
+#
+# One file, three run modes
+# -------------------------
+# This is the single implementation for every repository in the organization.
+# It runs three ways, and the first step works out which — failing closed on
+# anything it does not recognize:
+#
+#   reusable  Called via workflow_call by a thin caller pinned to a tag:
+#                 jobs:
+#                   attribution:
+#                     uses: Wilkes-Liberty/shared-ci/.github/workflows/attribution.yml@v1
+#   required  Started by the organization ruleset ("require workflows to pass
+#             before merging"), sourced from this repository at the ruleset's
+#             pinned tag. This is the enforcement layer: for pull_request
+#             events GitHub reads a caller workflow from the pull request
+#             itself, so a pull request can delete or neuter its repository's
+#             caller — but it cannot touch this run. Scan-only: when a caller
+#             run is also present it provides the strip service, and two
+#             flavors of the same check must never both force-push one branch.
+#   self      A pull request to this repository.
+#
+# pull_request (plus workflow_call) ONLY, deliberately: on `push` to the
+# default branch this would be permanently red against pre-existing history,
+# and a trailer cannot reach the default branch except through a PR or an
+# admin bypass.
+#
+# The trust model, which is the part that is easy to get wrong
+# ------------------------------------------------------------
+# A gate that runs code supplied by the thing it is gating is not a gate. The
+# scripts are therefore fetched from THIS repository — never from the
+# repository under review, whose pull request could have edited its own copy —
+# at a ref the pull request cannot influence:
+#
+#   reusable / required   job.workflow_sha — the commit this workflow file was
+#                         resolved to for this very run (whatever the tag pin
+#                         resolved to), so the scripts can never disagree with
+#                         the workflow that runs them.
+#   self                  the pull request's BASE commit. The merge-ref commit
+#                         would contain the PR's own edits to the scripts,
+#                         which is exactly the self-judging this model forbids.
+#
+# The PR head is fetched from `refs/pull/<n>/head` on the base repository
+# rather than cloned from the contributor's fork. That is also why fork PRs
+# work at all: the base commit and the head commit end up in one clone, so
+# `base..head` is readable. Cloning the fork instead leaves the base SHA
+# missing and the range unreadable, which fails the run rather than passing it,
+# but fails it for the wrong reason.
+
+on:
+  workflow_call:
+    inputs:
+      called:
+        # Mode-detection sentinel. Never set this from a caller. The `inputs`
+        # context is empty on pull_request runs, so this default materializes
+        # exactly when the run is a workflow_call — which is what the mode
+        # step keys on.
+        description: Leave unset. Exists so workflow_call runs are self-identifying.
+        type: boolean
+        default: true
+  pull_request:
+    # `edited` is load-bearing and NOT in the default set (opened, synchronize,
+    # reopened). This check scans the PR title and body, and both are editable
+    # after the check has gone green — so without `edited` a PR could pass, have
+    # an attribution typed into its title, and merge green. It also means a red
+    # body check can be cleared by fixing the body, instead of needing a
+    # no-op push.
+    #
+    # These types govern only this repository's own pull requests. Callers
+    # carry their own copy of this trigger, and ruleset-required runs ignore
+    # event filters entirely.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: write      # force-with-lease push of the cleaned PR branch
+  pull-requests: write # optional comment when trailers were stripped
+
+concurrency:
+  # The head SHA is load-bearing. The strip step force-pushes the cleaned
+  # branch, which starts a second run; without the SHA that run shares this
+  # group and cancel-in-progress kills the run that just did the stripping,
+  # mid-verification. A cancelled run is neither pass nor fail, so as a
+  # required check it can leave a PR unmergeable. Do not simplify this key.
+  #
+  # The `-direct` suffix keeps this group apart from the caller flavor's
+  # `-caller` group: a required run and a caller run of the same PR + SHA are
+  # both legitimate and must never cancel each other. Note this block does not
+  # govern workflow_call runs at all — a called workflow's own concurrency is
+  # ignored — which is why the caller template carries its own copy, and why
+  # that copy is load-bearing there.
+  group: attribution-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-direct
+  cancel-in-progress: true
+
+jobs:
+  attribution:
+    name: No AI attribution
+    runs-on: ubuntu-latest
+    # NOTE: no job-level `if:`. A skipped required check blocks the PR with no
+    # admin bypass. Fork / no-push paths are handled inside steps.
+    steps:
+      # 0. Establish how this run was started, and therefore which ref the
+      # trusted scripts come from. Fails closed: a run whose provenance cannot
+      # be established must not go on to execute anything.
+      - name: Determine the run mode
+        id: mode
+        env:
+          CALLED: ${{ inputs.called }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          echo "workflow_ref:     ${WORKFLOW_REF}"
+          echo "job.workflow_sha: ${JOB_WORKFLOW_SHA}"
+          if [ "$CALLED" = "true" ]; then
+            mode=reusable
+            # The exact commit the caller's tag pin resolved to. Nothing else
+            # names this repository's ref from inside a called run, so an
+            # empty value is unresolvable — refuse rather than guess.
+            scripts_ref="$JOB_WORKFLOW_SHA"
+            if [ -z "$scripts_ref" ]; then
+              echo "::error::workflow_call run but job.workflow_sha is empty; cannot locate the trusted scripts."
+              exit 1
+            fi
+          else
+            case "$WORKFLOW_REF" in
+              *@refs/tags/*)
+                mode=required
+                # Prefer the exact resolved commit; fall back to the pinned
+                # tag itself, which is equally outside the pull request's
+                # reach.
+                scripts_ref="${JOB_WORKFLOW_SHA:-${WORKFLOW_REF##*@}}"
+                ;;
+              *@refs/pull/*)
+                mode=self
+                scripts_ref="$BASE_SHA"
+                ;;
+              *)
+                echo "::error::unrecognized run mode (event=${GITHUB_EVENT_NAME}, workflow_ref=${WORKFLOW_REF}). This workflow runs only as a workflow_call callee, a ruleset-required run pinned to a tag, or a pull_request in its own repository."
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -z "$scripts_ref" ]; then
+            echo "::error::could not resolve a trusted scripts ref (mode=${mode})."
+            exit 1
+          fi
+          echo "mode: ${mode}; scripts ref: ${scripts_ref}"
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+          echo "scripts_ref=${scripts_ref}" >> "$GITHUB_OUTPUT"
+
+      # 1. TRUSTED checkout: the repository under review at the base commit.
+      # `repository:` is deliberately omitted so this cannot be pointed at a
+      # fork; github.repository is the repository being gated in all three
+      # modes.
+      - name: Check out the base commit (trusted)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+
+      # 2. Fetch the trusted scripts from the repository THIS WORKFLOW lives
+      # in, at the mode-resolved ref, straight into RUNNER_TEMP — never from
+      # the work tree, which belongs to the repository under review. Fails
+      # closed on any API error or an empty file.
+      - name: Fetch the trusted scripts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This repository. Hardcoded rather than derived: a wrong value
+          # fails loudly as a 404 right here, and no context expression
+          # available in all three modes names the repository this workflow
+          # file lives in.
+          SOURCE_REPO: Wilkes-Liberty/shared-ci
+          SCRIPTS_REF: ${{ steps.mode.outputs.scripts_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/trusted"
+          for f in check-attribution.py strip-attribution.py; do
+            gh api "repos/${SOURCE_REPO}/contents/.github/scripts/${f}?ref=${SCRIPTS_REF}" \
+              -H "Accept: application/vnd.github.raw" \
+              > "$RUNNER_TEMP/trusted/${f}"
+            if ! [ -s "$RUNNER_TEMP/trusted/${f}" ]; then
+              echo "::error::could not fetch ${f} from ${SOURCE_REPO}@${SCRIPTS_REF}; refusing to run without the trusted scripts."
+              exit 1
+            fi
+          done
+          echo "trusted scripts fetched from ${SOURCE_REPO}@${SCRIPTS_REF}"
+
+      # 3. Bring the PR head into this clone. From the BASE repository's
+      # refs/pull namespace, so it works for forks and leaves base and head in
+      # one repository where base..head is readable.
+      - name: Fetch the PR head
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --force origin \
+            "+refs/pull/${PR}/head:refs/heads/${BRANCH}"
+
+      # 4. Work tree becomes the PR content. Safe now: nothing below runs a
+      # script from it.
+      - name: Check out the PR head locally
+        env:
+          BRANCH: ${{ github.head_ref }}
+        # Fully qualified on purpose. A head_ref comes from the pull request and
+        # may legally begin with "-", which git would read as an option; the
+        # refs/heads/ prefix makes that impossible. Detaching is fine -- the
+        # strip step re-attaches the branch itself.
+        run: git checkout --quiet "refs/heads/${BRANCH}"
+
+      # The title and body reach the script through files, never through shell
+      # interpolation — a PR title is attacker-controlled text, and ${{ }}
+      # inside a run: block would let it execute.
+      - name: Stage the PR title and body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$PR_TITLE" > "$RUNNER_TEMP/pr-title.txt"
+          printf '%s' "$PR_BODY"  > "$RUNNER_TEMP/pr-body.txt"
+
+      # Never in required mode: the ruleset flavor is a pure gate. When a
+      # caller (or self) run is present on the same pull request it does the
+      # stripping; two flavors racing a force-with-lease on one branch would
+      # reliably red one of them for no reason a reader could see.
+      # Same-repo only: a fork's branch is not ours to rewrite, and the token
+      # cannot push to it. Fork PRs still get scanned below.
+      # Never rewrite the default branch. A pull request may legitimately be
+      # opened FROM the default branch -- master into a release branch, or
+      # simply aimed the wrong way -- and the strip step force-pushes whatever
+      # the head branch is. If Actions is permitted to bypass branch
+      # protection, that rewrites the default branch's history. The blast
+      # radius is the whole repository, and the control does not need it: the
+      # scan below still runs and still fails the check, a human just clears it
+      # by hand.
+      - name: Strip AI attribution trailers from commits
+        id: strip
+        if: >-
+          steps.mode.outputs.mode != 'required'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.head_ref != github.event.repository.default_branch
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BRANCH: ${{ github.head_ref }}
+          ORIGINAL_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/trusted/strip-attribution.py" \
+            --base "$BASE" \
+            --head HEAD \
+            --branch "$BRANCH" \
+            --push \
+            --force-with-lease-ref "${BRANCH}:${ORIGINAL_HEAD}"
+
+      - name: Comment when trailers were stripped
+        # A courtesy notice must never decide a required check. Without this, a
+        # rate limit or a transient API error on `gh pr comment` fails the job
+        # after stripping and scanning both succeeded.
+        continue-on-error: true
+        if: >-
+          steps.mode.outputs.mode != 'required'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.head_ref != github.event.repository.default_branch
+          && steps.strip.outputs.stripped == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          COUNT: ${{ steps.strip.outputs.count }}
+        run: |
+          set -euo pipefail
+          body="Removed AI attribution trailer(s) from **${COUNT}** commit(s) on this branch (standing order §1). Trees and author identity are unchanged; only the forbidden credit lines were dropped. Re-run of this check will confirm the tip is clean."
+          gh pr comment "$PR" --body "$body"
+
+      # Always scan — including when strip was skipped (required mode, fork PR)
+      # or a no-op. HEAD is the PR tip, rewritten in place by strip when that
+      # ran.
+      - name: Scan commits, title and body
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/trusted/check-attribution.py" \
+            --base "$BASE" \
+            --head HEAD \
+            --title-file "$RUNNER_TEMP/pr-title.txt" \
+            --body-file "$RUNNER_TEMP/pr-body.txt"

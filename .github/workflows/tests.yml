@@ -1,0 +1,23 @@
+name: Tests
+
+# Runs the test suite for the attribution scripts. These tests are the
+# behaviour pins for a control that gates every repository in the
+# organization — a change here that is not covered by them is a change nobody
+# will notice until it lets something through.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the unit tests
+        run: python3 -m unittest discover -s tests -v
