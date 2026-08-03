@@ -74,6 +74,19 @@ on:
         # context is empty on pull_request runs, so this default materializes
         # exactly when the run is a workflow_call — which is what the mode
         # step keys on.
+        #
+        # A hostile caller CAN pass `called: false` — inputs are caller-
+        # controlled — and gains nothing: that run then classifies as `self`,
+        # fetches the scripts from this repository at the pull request's base
+        # SHA (a ref that does not exist here → fail closed, red on the
+        # caller's own check), and its concurrency group takes the `-self`
+        # suffix, which no ruleset-required run ever uses. A pull_request
+        # event can never carry a tag-based workflow_ref, so no caller input
+        # reaches the `-required` group; the required flavor's grouping and
+        # sourcing stay outside any pull request's reach, which is the only
+        # property that matters. (`github.event_name` could not replace this
+        # sentinel: a called workflow reports the CALLER's event name, never
+        # `workflow_call`.)
         description: Leave unset. Exists so workflow_call runs are self-identifying.
         type: boolean
         default: true
@@ -101,13 +114,16 @@ concurrency:
   # mid-verification. A cancelled run is neither pass nor fail, so as a
   # required check it can leave a PR unmergeable. Do not simplify this key.
   #
-  # The `-direct` suffix keeps this group apart from the caller flavor's
-  # `-caller` group: a required run and a caller run of the same PR + SHA are
-  # both legitimate and must never cancel each other. Note this block does not
-  # govern workflow_call runs at all — a called workflow's own concurrency is
-  # ignored — which is why the caller template carries its own copy, and why
-  # that copy is load-bearing there.
-  group: attribution-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-direct
+  # The mode suffix is equally load-bearing, and it is derived, not a
+  # literal. This block DOES register for workflow_call runs — verified
+  # empirically in v1.0.0, where a static suffix put the caller-invoked run
+  # and the ruleset-required run of the same PR + SHA into one group and
+  # cancel-in-progress killed the required run, leaving every clean pull
+  # request unmergeable. Three run modes, three groups: a caller-invoked run,
+  # a ruleset-required run and a self run of the same PR + SHA are all
+  # legitimate and must never cancel each other. (The caller template also
+  # carries its own `-caller` group, which dedupes duplicate caller events.)
+  group: attribution-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ inputs.called && 'called' || (contains(github.workflow_ref, '@refs/tags/') && 'required' || 'self') }}
   cancel-in-progress: true
 
 jobs:

@@ -2,6 +2,20 @@
 
 All notable changes to shared-ci. One entry per merged PR.
 
+## v1.0.1 — 2026-08-02
+
+- **The required run no longer cancels itself against the caller run.** The
+  workflow-level `concurrency` group carried a static `-direct` suffix on the
+  assumption that a called workflow's own concurrency is ignored. It is not:
+  the block registers for `workflow_call` runs too, so the caller-invoked run
+  and the ruleset-required run of the same PR and head SHA shared one group,
+  and `cancel-in-progress` killed the required run — a cancelled required
+  check reports neither pass nor fail, which left every clean pull request
+  unmergeable. The suffix is now derived per run mode (`-called`,
+  `-required`, `-self`), so the three legitimate flavors of the same PR + SHA
+  never share a group. Caught by the ruleset verification probes before any
+  real pull request hit it.
+
 ## v1.0.0 — 2026-08-02
 
 - Initial release: the attribution workflow (`attribution.yml`), its two
