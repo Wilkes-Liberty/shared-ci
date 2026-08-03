@@ -74,6 +74,19 @@ on:
         # context is empty on pull_request runs, so this default materializes
         # exactly when the run is a workflow_call — which is what the mode
         # step keys on.
+        #
+        # A hostile caller CAN pass `called: false` — inputs are caller-
+        # controlled — and gains nothing: that run then classifies as `self`,
+        # fetches the scripts from this repository at the pull request's base
+        # SHA (a ref that does not exist here → fail closed, red on the
+        # caller's own check), and its concurrency group takes the `-self`
+        # suffix, which no ruleset-required run ever uses. A pull_request
+        # event can never carry a tag-based workflow_ref, so no caller input
+        # reaches the `-required` group; the required flavor's grouping and
+        # sourcing stay outside any pull request's reach, which is the only
+        # property that matters. (`github.event_name` could not replace this
+        # sentinel: a called workflow reports the CALLER's event name, never
+        # `workflow_call`.)
         description: Leave unset. Exists so workflow_call runs are self-identifying.
         type: boolean
         default: true
