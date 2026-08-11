@@ -2,6 +2,24 @@
 
 All notable changes to shared-ci. One entry per merged PR.
 
+## v1.1.0 — 2026-08-11
+
+- **Adds a reusable `release.yml`.** Publishes a GitHub Release for a `v*` tag
+  with notes extracted from the caller's `CHANGELOG.md`, marking `-rc.*` tags
+  as prereleases so `releases/latest` keeps resolving to the newest final.
+  `infra` had proved this workflow and was the only repository carrying it: on
+  2026-08-11 `webcms` had 6 Releases against 82 final tags and `ui` had 3
+  against 58, leaving `releases/latest` for both pointing months into the past
+  and the NIST 800-171 3.4.3 change-evidence control resting on `git log`
+  alone. The CHANGELOG extraction is inlined rather than shelling out to
+  `scripts/changelog-section.sh`, which only `infra` has — a reusable workflow
+  runs against the caller's checkout, so a script dependency would put three
+  copies of it in the organization. Behaviour is byte-identical to that script,
+  verified across every documented version in all three repositories.
+  Refuses any ref that is not a `vMAJOR.MINOR.PATCH[-suffix]` tag — a reusable
+  workflow can be invoked from any trigger, so a branch push would otherwise
+  have reached `gh release create` with the branch name as the tag.
+
 ## v1.0.1 — 2026-08-02
 
 - **The required run no longer cancels itself against the caller run.** The
