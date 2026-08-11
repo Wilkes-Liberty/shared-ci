@@ -16,6 +16,9 @@ All notable changes to shared-ci. One entry per merged PR.
   runs against the caller's checkout, so a script dependency would put three
   copies of it in the organization. Behaviour is byte-identical to that script,
   verified across every documented version in all three repositories.
+  Refuses any ref that is not a `vMAJOR.MINOR.PATCH[-suffix]` tag — a reusable
+  workflow can be invoked from any trigger, so a branch push would otherwise
+  have reached `gh release create` with the branch name as the tag.
 
 ## v1.0.1 — 2026-08-02
 

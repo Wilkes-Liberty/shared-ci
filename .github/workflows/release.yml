@@ -45,7 +45,13 @@ on:
   workflow_call:
     inputs:
       changelog-path:
-        description: Path to the CHANGELOG in the calling repository.
+        description: >-
+          Path to the CHANGELOG in the calling repository. It must use
+          Keep a Changelog headings: `## [MAJOR.MINOR.PATCH]` (an optional
+          ` - YYYY-MM-DD` suffix is fine) for finals, and `## [Unreleased]`
+          for the section an RC ships. A tag with no matching heading, or a
+          heading with nothing under it, fails the run rather than publishing
+          an empty Release.
         type: string
         default: CHANGELOG.md
 
@@ -57,6 +63,27 @@ jobs:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse anything that is not a v* release tag
+        # The header says this publishes Releases for v* tags; nothing enforced
+        # it. A caller can invoke a reusable workflow from any trigger, so a
+        # branch push or a stray tag would have reached `gh release create`
+        # with that ref as the tag name. Fail here, loudly, rather than
+        # publishing something nobody meant to release.
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "ERROR: expected a tag; the caller invoked this on ${GITHUB_REF_TYPE} '${GITHUB_REF_NAME}'." >&2
+            echo "Trigger this workflow from 'on: push: tags: [v*]' only." >&2
+            exit 1
+          fi
+          # Same shape the `make release` guards accept, so a tag that could be
+          # cut is a tag that can be published.
+          printf '%s' "${GITHUB_REF_NAME}" \
+            | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || {
+            echo "ERROR: tag '${GITHUB_REF_NAME}' is not vMAJOR.MINOR.PATCH[-suffix]." >&2
+            exit 1
+          }
+
       - name: Check out the tagged commit
         uses: actions/checkout@v7
         with:
