@@ -1,0 +1,148 @@
+name: Release
+
+# Publishes a GitHub Release for a v* tag, with notes taken from the caller's
+# CHANGELOG.md. One implementation for every repository in the organization.
+#
+# Why this exists
+# ---------------
+# Without it the evidence that a change shipped is spread across three places
+# an auditor has to correlate: an annotated tag whose notes are only readable
+# via `git tag -l --format='%(contents)'`, a CHANGELOG section in the repo at
+# that commit, and a workflow run log that ages out. NIST 800-171 3.4.3 (track,
+# review, approve and log changes) was carried by `git log` alone, which records
+# commits rather than what reached production and when. A Release is one
+# timestamped artifact bound to a commit, notes inline, actor recorded.
+#
+# Why shared rather than per-repo
+# -------------------------------
+# `infra` proved this workflow, and for a while it was the only repository that
+# had it: on 2026-08-11 `webcms` had 6 Releases against 82 final tags and `ui`
+# had 3 against 58, so `releases/latest` for both pointed at versions from
+# months earlier. Copying infra's file into each repository would have fixed
+# that and started the same drift the attribution workflow already exists to
+# end. This is the single copy; callers stay thin.
+#
+# Why the CHANGELOG extraction is inlined here rather than calling a script
+# ------------------------------------------------------------------------
+# infra carries `scripts/changelog-section.sh`; webcms and ui do not. A reusable
+# workflow runs against the CALLER's checkout, so a script dependency would mean
+# shipping that script to every repository — three copies of the thing this file
+# exists to have one of. The awk below is that script's logic, unchanged in
+# behaviour, with both of its failure modes preserved.
+#
+# Notes are GENERATED FROM the CHANGELOG, never duplicated into the release body
+# by hand — one canonical record, so drift is impossible.
+#
+# Injection posture: nothing from the event payload reaches a `run:` body. The
+# only `${{ }}` values used are the caller input and the job token, both passed
+# through `env:`; the tag is read from $GITHUB_REF_NAME as a shell variable and
+# quoted at every use.
+#
+# This deploys nothing. Deploys are driven separately by each repository's
+# deploy workflows on the same v* tag.
+
+on:
+  workflow_call:
+    inputs:
+      changelog-path:
+        description: Path to the CHANGELOG in the calling repository.
+        type: string
+        default: CHANGELOG.md
+
+permissions:
+  contents: write # required to create the Release
+
+jobs:
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v7
+        with:
+          # The CHANGELOG is read at the tagged commit, not at the default
+          # branch: an RC ships the notes that existed when it was cut.
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Extract release notes from the CHANGELOG
+        env:
+          CHANGELOG: ${{ inputs.changelog-path }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          [ -r "$CHANGELOG" ] || { echo "ERROR: cannot read ${CHANGELOG}" >&2; exit 2; }
+
+          # An RC reads [Unreleased] on purpose: these repositories do not
+          # relabel the CHANGELOG until the final release, so at RC time the
+          # notes for the work being shipped still live there. Relabelling at
+          # RC time would leave nothing to finalize, and a rejected RC would
+          # need it undone.
+          case "$TAG" in
+            *-rc.*) HEADING='## [Unreleased]' ;;
+            *)      HEADING="## [${TAG#v}]" ;;
+          esac
+
+          # Literal prefix match, not a regex: the heading contains [ and ],
+          # which would be a character class.
+          section="$(
+            awk -v want="$HEADING" '
+              index($0, want) == 1 { inside = 1; print; next }
+              inside && /^## / { exit }
+              inside { print }
+            ' "$CHANGELOG"
+          )"
+
+          [ -n "$section" ] || {
+            echo "ERROR: no '${HEADING}' section found in ${CHANGELOG}" >&2
+            exit 1
+          }
+
+          # A heading with nothing under it means the notes were never written.
+          # Publishing that empty is the "success that didn't happen" shape —
+          # a green run and a Releases page that documents nothing.
+          body="$(printf '%s\n' "$section" | tail -n +2 | grep -v '^[[:space:]]*$' || true)"
+          [ -n "$body" ] || {
+            echo "ERROR: '${HEADING}' section in ${CHANGELOG} is empty" >&2
+            exit 1
+          }
+
+          printf '%s\n' "$section" > /tmp/release-notes.md
+          echo "Extracted $(wc -l < /tmp/release-notes.md) lines for ${TAG}:"
+          head -5 /tmp/release-notes.md
+
+      - name: Publish the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          # RCs are marked prerelease so the Releases page separates them from
+          # finals at a glance, and so `releases/latest` — which excludes
+          # prereleases — keeps resolving to the newest FINAL. Sibling deploys
+          # pin infra by that endpoint, so mislabelling an RC here would change
+          # what other repositories deploy with.
+          PRERELEASE=""
+          case "$TAG" in
+            *-rc.*) PRERELEASE="--prerelease" ;;
+          esac
+
+          # Idempotent: re-running on an existing tag updates the notes instead
+          # of failing. Re-tagging is rare, but a red X on a release that
+          # already published would be misleading.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — updating notes."
+            gh release edit "$TAG" \
+              --notes-file /tmp/release-notes.md \
+              $PRERELEASE
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file /tmp/release-notes.md \
+              --verify-tag \
+              $PRERELEASE
+          fi
+
+          echo "Published: $(gh release view "$TAG" --json url --jq .url)"
