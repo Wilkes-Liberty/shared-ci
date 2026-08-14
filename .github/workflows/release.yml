@@ -134,7 +134,7 @@ jobs:
                 series="${TAG#v}"
                 series="${series%%-rc.*}"
                 HEADING="## [${series}]"
-                echo "WARN: [Unreleased] is empty; falling back to ${HEADING}" >&2
+                echo "WARN: [Unreleased] is missing or empty; falling back to ${HEADING}" >&2
                 section="$(extract_section "$HEADING")"
                 body="$(section_body "$section")"
               fi
