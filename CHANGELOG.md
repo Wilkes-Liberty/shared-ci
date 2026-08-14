@@ -4,6 +4,8 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## v1.1.1 — 2026-08-14
+
 - **RC Release notes fall back to the versioned heading.** `-rc.*` tags
   still prefer `[Unreleased]`. If that heading is missing or empty (the
   changelog was relabelled before the candidate), the job now reads
