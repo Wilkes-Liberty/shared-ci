@@ -2,6 +2,14 @@
 
 All notable changes to shared-ci. One entry per merged PR.
 
+## [Unreleased]
+
+- **RC Release notes fall back to the versioned heading.** `-rc.*` tags
+  still prefer `[Unreleased]`. If that heading is missing or empty (the
+  changelog was relabelled before the candidate), the job now reads
+  `## [X.Y.Z]` for the series instead of failing. webcms `v1.49.1-rc.1`
+  hit the empty-Unreleased path on 2026-08-14 (DEV-343).
+
 ## v1.1.0 — 2026-08-11
 
 - **Adds a reusable `release.yml`.** Publishes a GitHub Release for a `v*` tag

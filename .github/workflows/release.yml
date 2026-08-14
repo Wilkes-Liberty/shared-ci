@@ -48,10 +48,11 @@ on:
         description: >-
           Path to the CHANGELOG in the calling repository. It must use
           Keep a Changelog headings: `## [MAJOR.MINOR.PATCH]` (an optional
-          ` - YYYY-MM-DD` suffix is fine) for finals, and `## [Unreleased]`
-          for the section an RC ships. A tag with no matching heading, or a
-          heading with nothing under it, fails the run rather than publishing
-          an empty Release.
+          ` - YYYY-MM-DD` suffix is fine) for finals. An RC prefers
+          `## [Unreleased]`; if that heading is missing or empty it falls
+          back to the versioned `## [X.Y.Z]` section for the series. A tag
+          with no usable heading, or a heading with nothing under it, fails
+          the run rather than publishing an empty Release.
         type: string
         default: CHANGELOG.md
 
@@ -101,25 +102,49 @@ jobs:
 
           [ -r "$CHANGELOG" ] || { echo "ERROR: cannot read ${CHANGELOG}" >&2; exit 2; }
 
-          # An RC reads [Unreleased] on purpose: these repositories do not
-          # relabel the CHANGELOG until the final release, so at RC time the
-          # notes for the work being shipped still live there. Relabelling at
-          # RC time would leave nothing to finalize, and a rejected RC would
-          # need it undone.
-          case "$TAG" in
-            *-rc.*) HEADING='## [Unreleased]' ;;
-            *)      HEADING="## [${TAG#v}]" ;;
-          esac
-
           # Literal prefix match, not a regex: the heading contains [ and ],
           # which would be a character class.
-          section="$(
-            awk -v want="$HEADING" '
+          extract_section() {
+            awk -v want="$1" '
               index($0, want) == 1 { inside = 1; print; next }
               inside && /^## / { exit }
               inside { print }
             ' "$CHANGELOG"
-          )"
+          }
+          section_body() {
+            printf '%s\n' "$1" | tail -n +2 | grep -v '^[[:space:]]*$' || true
+          }
+
+          # An RC prefers [Unreleased]: these repositories do not relabel
+          # the CHANGELOG until the final release, so at RC time the notes
+          # for the work being shipped still live there. Relabelling at RC
+          # time would leave nothing to finalize, and a rejected RC would
+          # need it undone.
+          #
+          # If [Unreleased] is missing or empty — the changelog was
+          # finalized before the candidate — fall back to ## [X.Y.Z] for
+          # the series so the Release still publishes. webcms v1.49.1-rc.1
+          # (2026-08-14) failed here after that invert.
+          case "$TAG" in
+            *-rc.*)
+              HEADING='## [Unreleased]'
+              section="$(extract_section "$HEADING")"
+              body="$(section_body "$section")"
+              if [ -z "$body" ]; then
+                series="${TAG#v}"
+                series="${series%%-rc.*}"
+                HEADING="## [${series}]"
+                echo "WARN: [Unreleased] is empty; falling back to ${HEADING}" >&2
+                section="$(extract_section "$HEADING")"
+                body="$(section_body "$section")"
+              fi
+              ;;
+            *)
+              HEADING="## [${TAG#v}]"
+              section="$(extract_section "$HEADING")"
+              body="$(section_body "$section")"
+              ;;
+          esac
 
           [ -n "$section" ] || {
             echo "ERROR: no '${HEADING}' section found in ${CHANGELOG}" >&2
@@ -129,7 +154,6 @@ jobs:
           # A heading with nothing under it means the notes were never written.
           # Publishing that empty is the "success that didn't happen" shape —
           # a green run and a Releases page that documents nothing.
-          body="$(printf '%s\n' "$section" | tail -n +2 | grep -v '^[[:space:]]*$' || true)"
           [ -n "$body" ] || {
             echo "ERROR: '${HEADING}' section in ${CHANGELOG} is empty" >&2
             exit 1
