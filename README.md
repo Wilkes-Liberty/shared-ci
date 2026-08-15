@@ -49,7 +49,10 @@ concurrency:
   # superseded duplicate run from cancelling a live one. The head SHA keeps
   # the post-strip re-run out of this group. Do not simplify.
   group: attribution-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-caller
-  cancel-in-progress: true
+  # FALSE on purpose (issue #2): a cancelled duplicate of the required-class
+  # attribution check wears a red X until someone re-runs it. Duplicate
+  # deliveries queue and both finish green instead.
+  cancel-in-progress: false
 jobs:
   attribution:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/attribution.yml@v1
