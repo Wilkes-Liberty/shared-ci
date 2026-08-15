@@ -1,0 +1,52 @@
+# Fails loudly when a floating alias tag (v1, v2, ...) is pushed as an
+# annotated tag.
+#
+# The organization ruleset requires attribution.yml@refs/tags/v1. That rule
+# only auto-triggers when the ref points directly at a commit; an annotated
+# tag object in between silently breaks the resolution, and every open pull
+# request in the organization then waits forever on an attribution run that
+# will never start — with all of its real checks green, and nothing anywhere
+# saying why (issue #4; 2026-08-11 and 2026-08-14 were both this).
+#
+# The README documents the safe move (`git tag -f v1 vX.Y.Z^{commit}`); this
+# workflow is the alarm for the day the peel is forgotten. A red run named
+# "Alias tag must be lightweight" on a v1 push is a five-second diagnosis;
+# an org-wide stall is a multi-session incident. The exact-release tags
+# (vX.Y.Z) are deliberately not matched: those SHOULD be annotated.
+name: Alias guard
+
+on:
+  push:
+    tags:
+      - 'v[0-9]'
+      - 'v[0-9][0-9]'
+
+permissions: {}
+
+jobs:
+  alias-guard:
+    name: Alias tag must be lightweight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an annotated alias tag
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # For a lightweight tag, github.sha IS the commit the ref points at
+          # and the API object type is "commit". For an annotated tag the ref
+          # points at a tag object. No checkout needed: ask the API.
+          type=$(curl -sf \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/git/ref/tags/${TAG}" \
+            | jq -r '.object.type')
+          echo "refs/tags/${TAG} -> object type: ${type}"
+          if [ "${type}" != "commit" ]; then
+            echo "::error::refs/tags/${TAG} is an ANNOTATED tag (object type '${type}')." \
+              " The org required-workflow rule cannot resolve it and every open PR" \
+              " in the organization will stall on the attribution stage." \
+              " Fix now: git tag -f ${TAG} <release-tag>^{commit} && git push --force origin refs/tags/${TAG}"
+            exit 1
+          fi
