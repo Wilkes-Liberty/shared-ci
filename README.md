@@ -62,9 +62,21 @@ Consumers pin the floating major tag (`@v1`). Exact releases are tagged
 maintainer action:
 
 ```sh
-git tag -f v1 vX.Y.Z
+git tag -f v1 vX.Y.Z^{commit}
 git push --force origin refs/tags/v1
+git cat-file -t v1   # MUST print "commit"
 ```
+
+The `^{commit}` peel is load-bearing. `vX.Y.Z` is an annotated tag, and
+`git tag -f v1 vX.Y.Z` without the peel points `v1` at the annotated **tag
+object**, not the commit. The organization ruleset's required-workflow rule
+resolves `attribution.yml@refs/tags/v1`, and with that annotated indirection
+GitHub never auto-triggers the required evaluation run — every open pull
+request in the organization sits "stuck on the attribution stage" with all of
+its real checks green (issue #4; hit by the v1.1.0 release on 2026-08-11 and
+again by the v1.1.1 release on 2026-08-14). The `alias-guard` workflow fails
+loudly if a pushed alias is ever annotated, but do not rely on the alarm:
+verify the `cat-file` output before walking away.
 
 One atomic force push, never delete-then-push — a required workflow resolving
 the tag in the gap between the two fails to start, and a run that never starts
