@@ -53,6 +53,10 @@ concurrency:
   # attribution check wears a red X until someone re-runs it. Duplicate
   # deliveries queue and both finish green instead.
   cancel-in-progress: false
+  # max, not the single-slot default: with `queue: single` a third delivery in
+  # the same group evicts the pending run as cancelled — the same red X by
+  # another door. `queue: max` is only valid alongside cancel-in-progress: false.
+  queue: max
 jobs:
   attribution:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/attribution.yml@v1
