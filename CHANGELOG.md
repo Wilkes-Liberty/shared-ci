@@ -4,6 +4,24 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## v1.2.0 — 2026-08-14
+
+- **The alias move peels to a commit, and an annotated alias now alarms.**
+  The documented `git tag -f v1 vX.Y.Z` pointed the alias at the release's
+  annotated tag object, which the org required-workflow rule cannot resolve —
+  every open PR org-wide then stalls on the attribution stage with its real
+  checks green. Both incidents (2026-08-11 after v1.1.0, 2026-08-14 after
+  v1.1.1) were by-the-book releases. The README now peels
+  (`vX.Y.Z^{commit}`) and verifies with `cat-file`, and the new
+  `alias-guard.yml` fails loudly whenever a pushed `vN` alias tag is
+  annotated. (#4, PR #8)
+- **Duplicate attribution runs queue instead of cancelling.** Two event
+  deliveries for the same PR + SHA + mode landed in one concurrency group and
+  `cancel-in-progress` killed one at 0–1 s — a cancelled run of a
+  required-class control wears a red X until a human re-runs it. Duplicates
+  now queue and both finish green, in the reusable workflow and the README
+  caller template alike; the 14 thin callers sync as a follow-up. (#2, PR #9)
+
 ## v1.1.1 — 2026-08-14
 
 - **RC Release notes fall back to the versioned heading.** `-rc.*` tags
