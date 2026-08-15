@@ -4,6 +4,15 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+- **Same-group deliveries queue at depth, not in a single slot.** With the
+  default `queue: single`, a third delivery for the same group evicts the
+  pending run as cancelled — the same required-class red X that #2 removed
+  for in-progress runs. The reusable workflow and the README caller template
+  now set `queue: max` alongside `cancel-in-progress: false` (the two are
+  mutually exclusive with cancellation by GitHub's own validation). Surfaced
+  by automated review on the caller-sync sweep; verified against the
+  workflow-syntax documentation. (#2 follow-up)
+
 ## v1.2.0 — 2026-08-14
 
 - **The alias move peels to a commit, and an annotated alias now alarms.**
