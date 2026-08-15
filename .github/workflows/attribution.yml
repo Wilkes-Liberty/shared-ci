@@ -122,9 +122,20 @@ concurrency:
   # request unmergeable. Three run modes, three groups: a caller-invoked run,
   # a ruleset-required run and a self run of the same PR + SHA are all
   # legitimate and must never cancel each other. (The caller template also
-  # carries its own `-caller` group, which dedupes duplicate caller events.)
+  # carries its own `-caller` group, which serializes duplicate caller events.)
+  #
+  # cancel-in-progress is FALSE, and that is the third load-bearing choice
+  # (issue #2): when GitHub delivers two events for the same PR + SHA + mode
+  # in the same second — observed on the ruleset-required flavor across three
+  # consumer repos at once — cancellation kills one of them at 0-1s, and a
+  # CANCELLED run of a required-class control wears a red X that reads as the
+  # control failing until a human re-runs it. Duplicates in the same group now
+  # QUEUE instead: both complete, both green, and the cost is one duplicated
+  # ~10-second job instead of an org-wide habit of ignoring red attribution
+  # checks. Cancellation here bought economy, not correctness — do not
+  # reintroduce it.
   group: attribution-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ inputs.called && 'called' || (contains(github.workflow_ref, '@refs/tags/') && 'required' || 'self') }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   attribution:
