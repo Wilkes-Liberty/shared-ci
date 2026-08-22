@@ -161,6 +161,8 @@ def find_attribution(text: str):
 # Identity matching is split in two, because the vendor list contains two very
 # different kinds of word and treating them alike is wrong in both directions.
 #
+# --- BEGIN SHARED IDENTITY PATTERNS (keep identical to strip-attribution.py) ---
+
 # UNAMBIGUOUS -- a company or product, not something a person is called. Seeing
 # one in an author field is the claim by itself.
 IDENTITY_UNAMBIGUOUS = (
@@ -237,6 +239,8 @@ def find_identity_attribution(identities):
             return (f"an AI {role} identity ({hit.group(0)} with a bot/agent "
                     f"marker, in: {identity})")
     return None
+
+# --- END SHARED IDENTITY PATTERNS ---
 
 
 def escape_workflow_command(text: str) -> str:

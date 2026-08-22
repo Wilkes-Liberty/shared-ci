@@ -4,6 +4,25 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+- **Strip rewrites AI author/committer identities before the check.** Hosted
+  Cursor Cloud Agents always commit as `Cursor Agent <cursoragent@cursor.com>`
+  with the session initiator as `Co-authored-by`, and there is no dashboard
+  setting to change the primary author. `strip-attribution.py` previously
+  only removed AI *trailers* and preserved that author, so Cursor cloud PRs
+  stayed permanently red (vault#183). When author and/or committer would
+  fail `check-attribution.py`'s identity scan (same patterns), strip now
+  restamps that slot to a human: prefer a human `Co-authored-by` already on
+  the commit, else `STRIP_AUTHOR_NAME`/`STRIP_AUTHOR_EMAIL` (the workflow
+  passes the PR opener). If neither is available, identity is left alone
+  and the check fails closed — the script does not invent an author. Trees
+  and author/committer dates are preserved; an AI committer is restamped
+  to the same human. AI credit trailers are then removed as before, so
+  `Co-authored-by: Cursor Agent` is not left behind. The workflow also
+  PATCHes the PR body to drop Cursor cloud wrapper comments and the
+  trailing `cursor.com/agents` footer when those markers are present,
+  leaving the human-written summary intact. Callers stay on `@v1`; the
+  operator retags `v1` / cuts `v1.3.0` after this merges.
+
 - **Same-group deliveries queue at depth, not in a single slot.** With the
   default `queue: single`, a third delivery for the same group evicts the
   pending run as cancelled — the same required-class red X that #2 removed

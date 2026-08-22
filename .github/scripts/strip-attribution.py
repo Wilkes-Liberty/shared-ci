@@ -1,22 +1,45 @@
 #!/usr/bin/env python3
-"""Rewrite PR commits to drop AI-attribution trailers from their messages.
+"""Rewrite PR commits to drop AI-attribution trailers and AI identities.
 
 Wilkes & Liberty work reads as authored by the human operator. Local commit
 hooks cannot see server-side commits (GitHub "Commit suggestion", Copilot
-Autofix, web UI). The companion check-attribution.py *fails* a dirty PR; this
-script *cleans* the PR branch when it can, so the operator does not have to
-hand-rebase every Copilot trailer before merge.
+Autofix, web UI, hosted Cursor Cloud Agents). The companion
+check-attribution.py *fails* a dirty PR; this script *cleans* the PR branch
+when it can, so the operator does not have to hand-rebase every Copilot
+trailer or Cursor Agent author stamp before merge.
 
-Scope (deliberately narrow):
-  * Only rewrites **commit messages** in base..head (non-merge commits).
-  * Only removes attribution *shapes* — credit trailers naming an AI author,
-    "Generated with <AI>" footers, and the robot-emoji marker line.
-  * Preserves human Co-authored-by trailers, trees, author identity, and
-    author/committer dates.
-  * Does **not** edit PR title/body (the check still gates those).
-  * Does **not** rewrite mid-subject prose like "AI-assisted refactor" — those
-    still fail the check for a human reword (auto-rewriting subjects is too
-    lossy).
+Scope:
+  * Rewrites **commit messages** in base..head (non-merge commits) to remove
+    attribution *shapes* — credit trailers naming an AI author, "Generated
+    with <AI>" footers, and the robot-emoji marker line.
+  * Rewrites **author and/or committer identity** when that slot would fail
+    check-attribution.py's identity scan (same patterns — keep them in sync).
+    Replacement human, in order:
+      1. a human ``Co-authored-by:`` trailer already on the commit (name +
+         email that is NOT an AI identity under the same rules). Hosted
+         Cursor Cloud Agents stamp the session initiator this way.
+      2. ``STRIP_AUTHOR_NAME`` + ``STRIP_AUTHOR_EMAIL`` (the workflow passes
+         the PR opener).
+      3. if the author slot is already a human, that human (so an AI
+         committer on a human-authored commit can be restamped).
+    If none of those is available, identity is left alone and the check
+    fails closed. This script does not invent an author.
+  * After promoting a human to author (and committer if that slot was AI),
+    AI credit trailers are removed as today. ``Co-authored-by: Cursor Agent``
+    is not left behind. Human Co-authored-by trailers are preserved.
+  * Preserves trees and dates. When rewriting identity, GIT_AUTHOR_* is set
+    to the human and GIT_AUTHOR_DATE stays the original author date. If the
+    committer was AI, GIT_COMMITTER_* is set to the same human and
+    GIT_COMMITTER_DATE stays the original committer date. A human committer
+    is left untouched (server-side "Commit suggestion" on someone else's
+    work must not overwrite that human).
+  * ``clean_cursor_pr_body`` removes Cursor cloud wrapper markers from a PR
+    body string. The workflow PATCHes GitHub when those markers are present;
+    this script does not talk to the API.
+  * Does **not** rewrite mid-subject prose like "AI-assisted refactor" —
+    those still fail the check for a human reword (auto-rewriting subjects
+    is too lossy).
+  * Does **not** rewrite merge commits (linear history only).
 
 Usage:
   strip-attribution.py --base <sha> --head <sha> [--push] [--dry-run]
@@ -63,6 +86,216 @@ STRIP_LINE_PATTERNS = [
 ]
 
 # --- END SHARED PATTERNS ---
+
+# --- BEGIN SHARED IDENTITY PATTERNS (keep identical to check-attribution.py) ---
+
+# UNAMBIGUOUS -- a company or product, not something a person is called. Seeing
+# one in an author field is the claim by itself.
+IDENTITY_UNAMBIGUOUS = (
+    r"anthropic|openai|copilot|chatgpt|windsurf|aider|"
+    r"github\s*copilot|swe-?agent"
+)
+
+# AMBIGUOUS -- also ordinary human given names or common words. `claude` and
+# `devin` are names people have; `gemini`, `cursor`, `codex` and `llama` are
+# words. Flagging these on sight would block a contributor called Claude Dupont,
+# which on the published projects is an outside contribution refused for being
+# named wrong. They only count alongside a marker below.
+IDENTITY_AMBIGUOUS = r"claude|devin|gemini|cursor|codex|llama"
+
+# What turns an ambiguous token into a claim: a bot/agent marker, or a noreply
+# address of the kind automation commits under. `Claude <noreply@anthropic.com>`
+# is caught by the unambiguous list anyway; `claude-code[bot]` is caught here.
+# `bot` and `agent` are bounded the same way the tokens above are, and for the
+# same reason: unbounded, `agent` matches inside ordinary words that turn up in
+# real addresses -- `agentur` is German for agency, and `Reagent` is a surname.
+# Either would have combined with an ambiguous given name to flag a human.
+# `noreply` needs no boundary; it is not a fragment of anything.
+IDENTITY_BOT_MARKER = (
+    r"\[bot\]|(?<![a-z0-9])(?:bot|agent)(?![a-z0-9])|noreply|no-reply"
+)
+
+# Boundaries are explicitly alphanumeric rather than `\b`, because Python's `\b`
+# is built on `\w`, which counts `_` as a word character. `\bcopilot\b` does NOT
+# match `copilot_swe_agent` -- the underscore is the commonest separator in bot
+# handles, so the boundary intended to prevent surname false positives was also
+# skipping the exact identities this check exists for.
+def _bounded(alternation: str) -> re.Pattern:
+    return re.compile(rf"(?<![a-z0-9])(?:{alternation})(?![a-z0-9])", re.I)
+
+
+AI_IDENTITY_UNAMBIGUOUS = _bounded(IDENTITY_UNAMBIGUOUS)
+AI_IDENTITY_AMBIGUOUS = _bounded(IDENTITY_AMBIGUOUS)
+AI_IDENTITY_MARKER = re.compile(IDENTITY_BOT_MARKER, re.I)
+
+# Roles are checked separately so the message can say which one is wrong.
+# Both matter: an agent that authors a commit lands in the author slot, while a
+# server-side "Commit suggestion" can put one in the committer slot instead.
+IDENTITY_ROLES = ("author", "committer")
+
+
+def find_identity_attribution(identities):
+    """Return a description of the first AI identity found, or None.
+
+    `identities` is ((author_name, author_email), (committer_name, committer_email)).
+
+    An identity counts as an attribution when it contains an unambiguous vendor
+    or product name, OR an ambiguous token together with a bot/agent marker.
+    Name and email are considered as one string per role, so a marker in the
+    address qualifies a token in the name -- `Claude <claude-code[bot]@...>` is
+    one identity, not two unrelated fields.
+
+    Deliberately NOT a check that the address is an @wilkesliberty.com one.
+    Standing order §2 does require that of the operator, but this control also
+    runs on the published projects, where an external contributor's commit is
+    the point rather than a defect. A rule that fails every outside pull request
+    would be removed within a week, and taking the whole control with it.
+    """
+    for role, (name, email) in zip(IDENTITY_ROLES, identities):
+        identity = " ".join(v for v in (name, email) if v)
+        if not identity:
+            continue
+
+        hit = AI_IDENTITY_UNAMBIGUOUS.search(identity)
+        if hit:
+            return f"an AI {role} identity ({hit.group(0)} in: {identity})"
+
+        hit = AI_IDENTITY_AMBIGUOUS.search(identity)
+        if hit and AI_IDENTITY_MARKER.search(identity):
+            return (f"an AI {role} identity ({hit.group(0)} with a bot/agent "
+                    f"marker, in: {identity})")
+    return None
+
+# --- END SHARED IDENTITY PATTERNS ---
+
+
+# ``Co-authored-by: Name <email>`` (and the usual key spelling variants).
+# Name + email are both required; a trailer without an address cannot be
+# promoted to an identity field.
+COAUTHOR_LINE = re.compile(
+    r"^Co-?Authored-?By\s*:\s*(.+?)\s*<([^<>]+)>\s*$",
+    re.I | re.M,
+)
+
+CURSOR_PR_BODY_BEGIN = "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->"
+CURSOR_PR_BODY_END = "<!-- CURSOR_AGENT_PR_BODY_END -->"
+
+# Trailing footer Cursor appends after the end marker. Only a <div> at the
+# end of the body that mentions cursor.com/agents is removed, so a mention
+# of that URL in the human-written summary is left alone.
+CURSOR_PR_FOOTER = re.compile(
+    r"(?:\r?\n)*<div\b[^>]*>[\s\S]*?cursor\.com/agents[\s\S]*?</div>[ \t]*(?:\r?\n)*\Z",
+    re.I,
+)
+
+
+def identity_is_ai(name: str, email: str) -> bool:
+    """True when this name+email pair would fail the check's identity scan."""
+    return find_identity_attribution(((name, email), ("", ""))) is not None
+
+
+def human_coauthors(message: str) -> List[Tuple[str, str]]:
+    """Human ``Co-authored-by`` trailers on a commit message, oldest first."""
+    raw = message.replace("\r\n", "\n").replace("\r", "\n")
+    found: List[Tuple[str, str]] = []
+    for match in COAUTHOR_LINE.finditer(raw):
+        name = match.group(1).strip()
+        email = match.group(2).strip()
+        if name and email and not identity_is_ai(name, email):
+            found.append((name, email))
+    return found
+
+
+def env_strip_author() -> Optional[Tuple[str, str]]:
+    """Human from STRIP_AUTHOR_NAME + STRIP_AUTHOR_EMAIL, or None.
+
+    Both must be set and must themselves pass the identity scan. An AI
+    fallback is treated as missing so this script cannot restamp Cursor
+    with Cursor.
+    """
+    name = os.environ.get("STRIP_AUTHOR_NAME", "").strip()
+    email = os.environ.get("STRIP_AUTHOR_EMAIL", "").strip()
+    if name and email and not identity_is_ai(name, email):
+        return (name, email)
+    return None
+
+
+def resolve_replacement_human(message: str, meta: dict) -> Optional[Tuple[str, str]]:
+    """Human to stamp when author and/or committer is an AI identity.
+
+    Prefer a human Co-authored-by already on the commit. Else the
+    STRIP_AUTHOR_* env pair. If the author slot is already a human, that
+    human can replace an AI committer. Never invent a name.
+    """
+    humans = human_coauthors(message)
+    if humans:
+        return humans[0]
+    if (
+        meta.get("author_name")
+        and meta.get("author_email")
+        and not identity_is_ai(meta["author_name"], meta["author_email"])
+    ):
+        return (meta["author_name"], meta["author_email"])
+    return env_strip_author()
+
+
+def rewrite_identity(meta: dict, human: Tuple[str, str]) -> Tuple[dict, List[str]]:
+    """Return (new_meta, notes). Dates and tree are always preserved.
+
+    Author is restamped only when the current author is an AI identity.
+    Committer is restamped only when the current committer is an AI
+    identity, and then to the same human. A human in either slot is kept.
+    """
+    notes: List[str] = []
+    new_meta = dict(meta)
+    name, email = human
+    if identity_is_ai(meta["author_name"], meta["author_email"]):
+        new_meta["author_name"] = name
+        new_meta["author_email"] = email
+        notes.append(
+            f"author {meta['author_name']} <{meta['author_email']}> → {name} <{email}>"
+        )
+    if identity_is_ai(meta["committer_name"], meta["committer_email"]):
+        new_meta["committer_name"] = name
+        new_meta["committer_email"] = email
+        notes.append(
+            f"committer {meta['committer_name']} <{meta['committer_email']}> "
+            f"→ {name} <{email}>"
+        )
+    return new_meta, notes
+
+
+def identity_changed(old: dict, new: dict) -> bool:
+    return (
+        old["author_name"] != new["author_name"]
+        or old["author_email"] != new["author_email"]
+        or old["committer_name"] != new["committer_name"]
+        or old["committer_email"] != new["committer_email"]
+    )
+
+
+def clean_cursor_pr_body(body: str) -> Optional[str]:
+    """Return a cleaned PR body if Cursor cloud wrappers are present, else None.
+
+    Removes the BEGIN/END HTML comments and a trailing
+    ``<div>…cursor.com/agents…</div>`` footer. The human-written summary
+    between the markers is preserved. Returns None when no wrapper is
+    present so callers can no-op without a GitHub write.
+    """
+    if not body:
+        return None
+    has_begin = CURSOR_PR_BODY_BEGIN in body
+    has_end = CURSOR_PR_BODY_END in body
+    has_footer = CURSOR_PR_FOOTER.search(body) is not None
+    if not (has_begin or has_end or has_footer):
+        return None
+    cleaned = body.replace(CURSOR_PR_BODY_BEGIN, "").replace(CURSOR_PR_BODY_END, "")
+    cleaned = CURSOR_PR_FOOTER.sub("", cleaned)
+    cleaned = re.sub(r"^\s*\n", "", cleaned)
+    cleaned = re.sub(r"\n[ \t]*\Z", "\n", cleaned)
+    if cleaned and not cleaned.endswith("\n"):
+        cleaned += "\n"
+    return cleaned
 
 
 def git(args: List[str], *, check: bool = True, text: bool = True) -> subprocess.CompletedProcess:
@@ -224,8 +457,44 @@ def write_commit(tree: str, parent: Optional[str], message: str, meta: dict) -> 
     return proc.stdout.strip()
 
 
+def plan_commit(sha: str, message: str) -> dict:
+    """Decide whether this commit can be cleaned, and how.
+
+    Returns a dict with cleaned message, removed trailer lines, original
+    meta, replacement human (or None), and whether identity / message
+    will change. Identity is only marked changeable when a replacement
+    human exists — otherwise the check fails closed.
+    """
+    cleaned, removed = clean_message(message)
+    original_norm = message if message.endswith("\n") else message + "\n"
+    meta = commit_meta(sha)
+    author_ai = identity_is_ai(meta["author_name"], meta["author_email"])
+    committer_ai = identity_is_ai(meta["committer_name"], meta["committer_email"])
+    identity_dirty = author_ai or committer_ai
+    human = resolve_replacement_human(message, meta) if identity_dirty else None
+    new_meta = meta
+    identity_notes: List[str] = []
+    if identity_dirty and human:
+        new_meta, identity_notes = rewrite_identity(meta, human)
+    return {
+        "cleaned": cleaned,
+        "removed": removed,
+        "original_norm": original_norm,
+        "meta": meta,
+        "new_meta": new_meta,
+        "human": human,
+        "identity_dirty": identity_dirty,
+        "identity_notes": identity_notes,
+        "message_changed": bool(removed) or cleaned != original_norm,
+        "identity_changed": identity_changed(meta, new_meta),
+    }
+
+
 def rewrite_range(base: str, head: str) -> Tuple[str, int, List[str]]:
-    """Rewrite dirty messages in base..head. Returns (new_head, n_stripped, notes)."""
+    """Rewrite dirty messages and AI identities in base..head.
+
+    Returns (new_head, n_stripped, notes).
+    """
     commits = commits_oldest_first(base, head)
     if not commits:
         return head, 0, []
@@ -240,15 +509,16 @@ def rewrite_range(base: str, head: str) -> Tuple[str, int, List[str]]:
 
     # Walk oldest → newest so parents exist before children.
     for sha, message in commits:
-        cleaned, removed = clean_message(message)
-        meta = commit_meta(sha)
+        plan = plan_commit(sha, message)
         old_parent = first_parent(sha)
         new_parent = mapping.get(old_parent, old_parent) if old_parent else None
+        meta = plan["meta"]
+        new_meta = plan["new_meta"]
+        cleaned = plan["cleaned"]
 
-        if not removed and cleaned == (
-            message if message.endswith("\n") else message + "\n"
-        ):
-            # Message unchanged. Still may need a new commit if parent moved.
+        if not plan["message_changed"] and not plan["identity_changed"]:
+            # Message and identity unchanged. Still may need a new commit if
+            # parent moved.
             if old_parent and new_parent != old_parent:
                 new_sha = write_commit(meta["tree"], new_parent, cleaned, meta)
                 mapping[sha] = new_sha
@@ -258,22 +528,17 @@ def rewrite_range(base: str, head: str) -> Tuple[str, int, List[str]]:
                 new_tip = sha
             continue
 
-        # Normalize comparison: treat missing final newline as equivalent.
-        original_norm = message if message.endswith("\n") else message + "\n"
-        if cleaned == original_norm and not removed:
-            mapping[sha] = sha
-            new_tip = sha
-            continue
-
-        new_sha = write_commit(meta["tree"], new_parent, cleaned, meta)
+        new_sha = write_commit(new_meta["tree"], new_parent, cleaned, new_meta)
         mapping[sha] = new_sha
         new_tip = new_sha
         stripped += 1
         notes.append(
-            f"{short(sha)} → {short(new_sha)}: removed {len(removed)} line(s)"
+            f"{short(sha)} → {short(new_sha)}: removed {len(plan['removed'])} line(s)"
         )
-        for line in removed:
+        for line in plan["removed"]:
             notes.append(f"    - {line.rstrip()}")
+        for line in plan["identity_notes"]:
+            notes.append(f"    - {line}")
 
     return new_tip, stripped, notes
 
@@ -345,11 +610,26 @@ def main() -> int:
 
     commits = commits_oldest_first(base_sha, head_sha)
     dirty = []
+    leftover_identity = []
     for sha, message in commits:
-        cleaned, removed = clean_message(message)
-        original_norm = message if message.endswith("\n") else message + "\n"
-        if removed or cleaned != original_norm:
-            dirty.append((sha, removed))
+        plan = plan_commit(sha, message)
+        if plan["message_changed"] or plan["identity_changed"]:
+            dirty.append((sha, plan))
+        elif plan["identity_dirty"]:
+            leftover_identity.append((sha, plan["meta"]))
+
+    if leftover_identity:
+        print(
+            "strip-attribution: AI author/committer identity on "
+            f"{len(leftover_identity)} commit(s) has no human Co-authored-by "
+            "trailer and no STRIP_AUTHOR_NAME/STRIP_AUTHOR_EMAIL; leaving "
+            "identity alone (fail closed)"
+        )
+        for sha, meta in leftover_identity:
+            print(
+                f"  {short(sha)}: {meta['author_name']} <{meta['author_email']}> "
+                f"/ {meta['committer_name']} <{meta['committer_email']}>"
+            )
 
     if not dirty:
         print(f"strip-attribution: clean ({short(base_sha)}..{short(head_sha)}, "
@@ -362,10 +642,12 @@ def main() -> int:
         f"strip-attribution: {len(dirty)} commit(s) carry removable AI attribution "
         f"in {short(base_sha)}..{short(head_sha)}"
     )
-    for sha, removed in dirty:
+    for sha, plan in dirty:
         print(f"  {short(sha)}:")
-        for line in removed:
+        for line in plan["removed"]:
             print(f"    - {line.rstrip()}")
+        for line in plan["identity_notes"]:
+            print(f"    - {line}")
 
     if args.dry_run:
         set_output("stripped", "false")

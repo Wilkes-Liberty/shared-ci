@@ -18,8 +18,14 @@ keeps authorship credit that way on every pull request:
 
 1. **Strips** removable AI credit lines from commit messages on the PR branch
    (credit trailers naming an AI author, "Generated with …" footers, the
-   robot-emoji marker line) and force-with-lease pushes the cleaned tip —
-   same-repo PRs only.
+   robot-emoji marker line) **and rewrites AI author/committer identities
+   to a human** (prefer a human Co-authored-by trailer already on the
+   commit — hosted Cursor Cloud Agents stamp the session initiator this
+   way — else the PR opener). Trees and dates are preserved. If no human
+   replacement is available the identity is left alone and the check
+   fails closed. Same-repo PRs only; then force-with-lease pushes the
+   cleaned tip. Cursor cloud wrappers in the PR body are removed when
+   present.
 2. **Fails** the check if any attribution credit remains: commit messages,
    commit author/committer identities, PR title, or PR body.
 
