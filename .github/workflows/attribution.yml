@@ -19,8 +19,9 @@ name: Attribution
 #    author/committer identities on the PR branch (same-repo PRs only) and
 #    force-with-lease pushes the cleaned tip. Identity rewrite prefers a
 #    human Co-authored-by trailer already on the commit, else the PR opener
-#    via STRIP_AUTHOR_*; if neither is available the identity is left alone
-#    and the check fails closed.
+#    via STRIP_AUTHOR_* in @users.noreply.github.com shape, else
+#    Jeremy Michael Cerda <jmcerda@users.noreply.github.com>. Do not
+#    default to @wilkesliberty.com (operator lock 2026-08-22 / DEV-414).
 # 2. Cursor cloud PR-body wrappers (CURSOR_AGENT_PR_BODY_* comments and the
 #    trailing cursor.com/agents footer) are stripped via gh api PATCH when
 #    present. The human-written summary is preserved.
@@ -305,11 +306,13 @@ jobs:
           BRANCH: ${{ github.head_ref }}
           ORIGINAL_HEAD: ${{ github.event.pull_request.head.sha }}
           # Fallback human when a commit has an AI author/committer and no
-          # human Co-authored-by trailer. Cursor already stamps the session
-          # initiator as Co-authored-by; this covers the rest. Both must be
-          # set — the script will not invent an author.
+          # human Co-authored-by trailer. Must be @users.noreply.github.com
+          # (operator lock 2026-08-22): never @wilkesliberty.com. The script
+          # defaults to Jeremy Michael Cerda <jmcerda@users.noreply.github.com>
+          # when this pair is unset. Cursor already stamps the session
+          # initiator as Co-authored-by; this covers the rest.
           STRIP_AUTHOR_NAME: ${{ github.event.pull_request.user.login }}
-          STRIP_AUTHOR_EMAIL: ${{ github.event.pull_request.user.id }}+${{ github.event.pull_request.user.login }}@users.noreply.github.com
+          STRIP_AUTHOR_EMAIL: ${{ github.event.pull_request.user.login }}@users.noreply.github.com
         run: |
           set -euo pipefail
           python3 "$RUNNER_TEMP/trusted/strip-attribution.py" \

@@ -11,11 +11,13 @@ All notable changes to shared-ci. One entry per merged PR.
   only removed AI *trailers* and preserved that author, so Cursor cloud PRs
   stayed permanently red (vault#183). When author and/or committer would
   fail `check-attribution.py`'s identity scan (same patterns), strip now
-  restamps that slot to a human: prefer a human `Co-authored-by` already on
-  the commit, else `STRIP_AUTHOR_NAME`/`STRIP_AUTHOR_EMAIL` (the workflow
-  passes the PR opener). If neither is available, identity is left alone
-  and the check fails closed — the script does not invent an author. Trees
-  and author/committer dates are preserved; an AI committer is restamped
+  restamps that slot to a human (operator lock 2026-08-22 / DEV-414):
+  prefer a human `Co-authored-by` already on the commit, else
+  `STRIP_AUTHOR_*` from the PR opener in `@users.noreply.github.com`
+  shape, else `Jeremy Michael Cerda <jmcerda@users.noreply.github.com>`.
+  `@wilkesliberty.com` is not the strip rewrite default — company mail
+  is only for identities we stamp at commit time. Trees and
+  author/committer dates are preserved; an AI committer is restamped
   to the same human. AI credit trailers are then removed as before, so
   `Co-authored-by: Cursor Agent` is not left behind. The workflow also
   PATCHes the PR body to drop Cursor cloud wrapper comments and the

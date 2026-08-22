@@ -148,6 +148,14 @@ class Repo:
 class PatternSyncTest(unittest.TestCase):
     """Strip and check must agree on what an AI identity is."""
 
+    def test_default_rewrite_human_is_jeremy_noreply_not_company_mail(self):
+        strip = load_script("strip_attribution_default", STRIP)
+        self.assertEqual(strip.DEFAULT_REWRITE_HUMAN, HUMAN_NOREPLY)
+        self.assertFalse(
+            strip.DEFAULT_REWRITE_HUMAN[1].endswith("@wilkesliberty.com")
+        )
+        self.assertFalse(strip.identity_is_ai(*strip.DEFAULT_REWRITE_HUMAN))
+
     def test_shared_pattern_strings_match(self):
         check = load_script("check_attribution", CHECK)
         strip = load_script("strip_attribution", STRIP)
@@ -221,8 +229,8 @@ class Vault183ShapeTest(unittest.TestCase):
         self.assertEqual(check.returncode, CLEAN, check.stdout + check.stderr)
 
 
-class FailClosedTest(unittest.TestCase):
-    """No human trailer and no STRIP_AUTHOR_* → do not invent an author."""
+class DefaultRewriteTest(unittest.TestCase):
+    """Operator lock 2026-08-22: default rewrite is Jeremy noreply, not company mail."""
 
     def setUp(self):
         self.repo = Repo()
@@ -230,18 +238,30 @@ class FailClosedTest(unittest.TestCase):
     def tearDown(self):
         self.repo.cleanup()
 
-    def test_cursor_author_without_human_or_env_stays_dirty(self):
+    def test_no_trailer_no_env_rewrites_to_jeremy_noreply(self):
         self.repo.commit("a change with no human trailer", identity=CURSOR)
-        before = self.repo.log_identity()
         result = self.repo.strip()
-        self.assertEqual(result.returncode, CLEAN, result.stderr)
-        self.assertEqual(self.repo.log_identity(), before)
-        self.assertIn("fail closed", result.stdout)
-        check = self.repo.check()
-        self.assertEqual(check.returncode, DIRTY, check.stdout)
-        self.assertIn("AI author identity", check.stdout)
+        self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
+        ident = self.repo.log_identity()
+        self.assertEqual((ident["author_name"], ident["author_email"]), HUMAN_NOREPLY)
+        self.assertNotEqual(ident["author_email"], HUMAN[1])
+        self.assertTrue(ident["author_email"].endswith("@users.noreply.github.com"))
+        self.assertEqual(self.repo.check().returncode, CLEAN)
 
-    def test_env_fallback_rewrites_when_no_human_trailer(self):
+    def test_noreply_env_overrides_default(self):
+        opener = ("other-operator", "other-operator@users.noreply.github.com")
+        self.repo.commit("a change with no human trailer", identity=CURSOR)
+        result = self.repo.strip(extra_env={
+            "STRIP_AUTHOR_NAME": opener[0],
+            "STRIP_AUTHOR_EMAIL": opener[1],
+        })
+        self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
+        ident = self.repo.log_identity()
+        self.assertEqual((ident["author_name"], ident["author_email"]), opener)
+        self.assertEqual(self.repo.check().returncode, CLEAN)
+
+    def test_company_email_env_is_not_used_as_rewrite_target(self):
+        """@wilkesliberty.com is not accepted via STRIP_AUTHOR_*."""
         self.repo.commit("a change with no human trailer", identity=CURSOR)
         result = self.repo.strip(extra_env={
             "STRIP_AUTHOR_NAME": HUMAN[0],
@@ -249,19 +269,20 @@ class FailClosedTest(unittest.TestCase):
         })
         self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
         ident = self.repo.log_identity()
-        self.assertEqual((ident["author_name"], ident["author_email"]), HUMAN)
-        self.assertEqual(self.repo.check().returncode, CLEAN)
+        self.assertEqual((ident["author_name"], ident["author_email"]), HUMAN_NOREPLY)
+        self.assertNotEqual(ident["author_email"], HUMAN[1])
 
     def test_ai_env_fallback_is_ignored(self):
-        """STRIP_AUTHOR_* that is itself an AI identity is treated as missing."""
+        """STRIP_AUTHOR_* that is itself an AI identity falls through to Jeremy noreply."""
         self.repo.commit("a change with no human trailer", identity=CURSOR)
         result = self.repo.strip(extra_env={
             "STRIP_AUTHOR_NAME": CURSOR[0],
             "STRIP_AUTHOR_EMAIL": CURSOR[1],
         })
-        self.assertEqual(self.repo.log_identity()["author_name"], CURSOR[0])
-        self.assertIn("fail closed", result.stdout)
-        self.assertEqual(self.repo.check().returncode, DIRTY)
+        ident = self.repo.log_identity()
+        self.assertEqual((ident["author_name"], ident["author_email"]), HUMAN_NOREPLY)
+        self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
+        self.assertEqual(self.repo.check().returncode, CLEAN)
 
 
 class TrailerAndDateTest(unittest.TestCase):

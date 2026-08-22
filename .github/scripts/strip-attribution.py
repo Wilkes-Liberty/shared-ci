@@ -14,16 +14,21 @@ Scope:
     with <AI>" footers, and the robot-emoji marker line.
   * Rewrites **author and/or committer identity** when that slot would fail
     check-attribution.py's identity scan (same patterns — keep them in sync).
-    Replacement human, in order:
+    Replacement human, operator lock 2026-08-22 (DEV-414), in order:
       1. a human ``Co-authored-by:`` trailer already on the commit (name +
          email that is NOT an AI identity under the same rules). Hosted
          Cursor Cloud Agents stamp the session initiator this way.
-      2. ``STRIP_AUTHOR_NAME`` + ``STRIP_AUTHOR_EMAIL`` (the workflow passes
-         the PR opener).
+      2. ``STRIP_AUTHOR_NAME`` + ``STRIP_AUTHOR_EMAIL`` when both are set,
+         not an AI identity, and the address is ``@users.noreply.github.com``
+         (the workflow passes the PR opener in that shape).
       3. if the author slot is already a human, that human (so an AI
          committer on a human-authored commit can be restamped).
-    If none of those is available, identity is left alone and the check
-    fails closed. This script does not invent an author.
+      4. ``Jeremy Michael Cerda <jmcerda@users.noreply.github.com>``.
+    Standing-orders ``@wilkesliberty.com`` is used only when we actually
+    control identity at commit time. It is not the strip rewrite default
+    and is not accepted via ``STRIP_AUTHOR_*`` — those must be the
+    GitHub noreply shape. A company address already on a human
+    Co-authored-by trailer is still preferred (rule 1).
   * After promoting a human to author (and committer if that slot was AI),
     AI credit trailers are removed as today. ``Co-authored-by: Cursor Agent``
     is not left behind. Human Co-authored-by trailers are preserved.
@@ -177,6 +182,18 @@ COAUTHOR_LINE = re.compile(
     re.I | re.M,
 )
 
+# Operator lock 2026-08-22 (DEV-414): rewrite target when no human
+# Co-authored-by is present. GitHub noreply, not @wilkesliberty.com —
+# company mail is for identities we stamp at commit time, not for
+# restamping history we did not author.
+DEFAULT_REWRITE_HUMAN = (
+    "Jeremy Michael Cerda",
+    "jmcerda@users.noreply.github.com",
+)
+
+# STRIP_AUTHOR_* is only consumed when it matches this shape.
+NOREPLY_EMAIL = re.compile(r"@users\.noreply\.github\.com\s*$", re.I)
+
 CURSOR_PR_BODY_BEGIN = "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->"
 CURSOR_PR_BODY_END = "<!-- CURSOR_AGENT_PR_BODY_END -->"
 
@@ -209,13 +226,20 @@ def human_coauthors(message: str) -> List[Tuple[str, str]]:
 def env_strip_author() -> Optional[Tuple[str, str]]:
     """Human from STRIP_AUTHOR_NAME + STRIP_AUTHOR_EMAIL, or None.
 
-    Both must be set and must themselves pass the identity scan. An AI
-    fallback is treated as missing so this script cannot restamp Cursor
-    with Cursor.
+    Both must be set, pass the identity scan, and use a
+    ``@users.noreply.github.com`` address (operator lock 2026-08-22).
+    An AI fallback or a company-domain address is treated as missing
+    so this script cannot restamp Cursor with Cursor, and cannot
+    hardcode ``@wilkesliberty.com`` as a rewrite target.
     """
     name = os.environ.get("STRIP_AUTHOR_NAME", "").strip()
     email = os.environ.get("STRIP_AUTHOR_EMAIL", "").strip()
-    if name and email and not identity_is_ai(name, email):
+    if (
+        name
+        and email
+        and not identity_is_ai(name, email)
+        and NOREPLY_EMAIL.search(email)
+    ):
         return (name, email)
     return None
 
@@ -223,20 +247,25 @@ def env_strip_author() -> Optional[Tuple[str, str]]:
 def resolve_replacement_human(message: str, meta: dict) -> Optional[Tuple[str, str]]:
     """Human to stamp when author and/or committer is an AI identity.
 
-    Prefer a human Co-authored-by already on the commit. Else the
-    STRIP_AUTHOR_* env pair. If the author slot is already a human, that
-    human can replace an AI committer. Never invent a name.
+    Operator lock 2026-08-22 (DEV-414): prefer a human Co-authored-by
+    already on the commit; else a noreply-shaped STRIP_AUTHOR_* (PR
+    opener); else an already-human author slot; else
+    DEFAULT_REWRITE_HUMAN (Jeremy noreply). Never default to
+    @wilkesliberty.com.
     """
     humans = human_coauthors(message)
     if humans:
         return humans[0]
+    env = env_strip_author()
+    if env:
+        return env
     if (
         meta.get("author_name")
         and meta.get("author_email")
         and not identity_is_ai(meta["author_name"], meta["author_email"])
     ):
         return (meta["author_name"], meta["author_email"])
-    return env_strip_author()
+    return DEFAULT_REWRITE_HUMAN
 
 
 def rewrite_identity(meta: dict, human: Tuple[str, str]) -> Tuple[dict, List[str]]:
@@ -621,9 +650,8 @@ def main() -> int:
     if leftover_identity:
         print(
             "strip-attribution: AI author/committer identity on "
-            f"{len(leftover_identity)} commit(s) has no human Co-authored-by "
-            "trailer and no STRIP_AUTHOR_NAME/STRIP_AUTHOR_EMAIL; leaving "
-            "identity alone (fail closed)"
+            f"{len(leftover_identity)} commit(s) could not be rewritten; "
+            "leaving identity alone (fail closed)"
         )
         for sha, meta in leftover_identity:
             print(
