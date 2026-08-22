@@ -22,8 +22,12 @@ All notable changes to shared-ci. One entry per merged PR.
   `Co-authored-by: Cursor Agent` is not left behind. The workflow also
   PATCHes the PR body to drop Cursor cloud wrapper comments and the
   trailing `cursor.com/agents` footer when those markers are present,
-  leaving the human-written summary intact. Callers stay on `@v1`; the
-  operator retags `v1` / cuts `v1.3.0` after this merges.
+  leaving the human-written summary intact. The strip suite pins a
+  Copilot Autofix / `copilot-swe-agent[bot]` tip (authored and committed
+  as that identity, human Co-authored-by already on the commit) so the
+  rewrite path restamps HEAD, not only Cursor Agent mid-range commits.
+  Callers stay on `@v1`; the operator retags `v1` / cuts `v1.3.0` after
+  this merges.
 
 - **Same-group deliveries queue at depth, not in a single slot.** With the
   default `queue: single`, a third delivery for the same group evicts the

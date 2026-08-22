@@ -31,6 +31,11 @@ DIRTY = 1
 HUMAN = ("Jeremy Michael Cerda", "jmcerda@wilkesliberty.com")
 HUMAN_NOREPLY = ("Jeremy Michael Cerda", "jmcerda@users.noreply.github.com")
 CURSOR = ("Cursor Agent", "cursoragent@cursor.com")
+# GitHub Copilot Autofix / coding-agent tip. Same shape check-attribution
+# already flags (unambiguous `copilot` / `swe-agent`). The 2026-08-01 miss
+# that prompted the identity scan used this author on a merged PR.
+AUTOFIX = ("copilot-swe-agent[bot]", "198982749+Copilot@users.noreply.github.com")
+AUTOFIX_DISPLAY = ("Copilot Autofix", "198982749+Copilot@users.noreply.github.com")
 
 
 def trailer(author: str) -> str:
@@ -172,6 +177,8 @@ class PatternSyncTest(unittest.TestCase):
             (CURSOR, True),
             (HUMAN, False),
             (HUMAN_NOREPLY, False),
+            (AUTOFIX, True),
+            (AUTOFIX_DISPLAY, True),
             (("copilot-swe-agent[bot]", "x@users.noreply.github.com"), True),
             (("Claude Dupont", "claude.dupont@example.fr"), False),
             (("dependabot[bot]",
@@ -227,6 +234,51 @@ class Vault183ShapeTest(unittest.TestCase):
         self.assertNotIn("Cursor Agent", self.repo.message())
         check = self.repo.check()
         self.assertEqual(check.returncode, CLEAN, check.stdout + check.stderr)
+
+
+class AutofixTipTest(unittest.TestCase):
+    """Copilot Autofix / copilot-swe-agent[bot] as the PR tip.
+
+    Cursor Agent coverage lives in Vault183ShapeTest. The gap this pins is
+    an Autofix commit sitting on HEAD: authored and committed as the
+    Copilot coding-agent identity, with the operator already on the
+    commit as a human Co-authored-by. Strip must restamp that tip, not
+    only mid-range Cursor commits, or the check stays red on the tip.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+        # A human commit under the tip, so Autofix is HEAD rather than
+        # the only commit in the range.
+        self.repo.commit("human work on the branch")
+        self.msg = (
+            "Apply Autofix suggestion\n\n"
+            + trailer(f"{HUMAN_NOREPLY[0]} <{HUMAN_NOREPLY[1]}>")
+        )
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def _assert_tip_rewritten_to_human(self, identity):
+        self.repo.commit(self.msg, identity=identity, committer=identity)
+        self.assertEqual(self.repo.log_identity()["author_name"], identity[0])
+        tree_before = self.repo.tree()
+        result = self.repo.strip()
+        self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
+        ident = self.repo.log_identity()
+        self.assertEqual((ident["author_name"], ident["author_email"]), HUMAN_NOREPLY)
+        self.assertEqual(
+            (ident["committer_name"], ident["committer_email"]), HUMAN_NOREPLY
+        )
+        self.assertEqual(self.repo.tree(), tree_before)
+        check = self.repo.check()
+        self.assertEqual(check.returncode, CLEAN, check.stdout + check.stderr)
+
+    def test_copilot_swe_agent_tip_with_human_coauthor_passes_check(self):
+        self._assert_tip_rewritten_to_human(AUTOFIX)
+
+    def test_copilot_autofix_display_name_tip_with_human_coauthor_passes_check(self):
+        self._assert_tip_rewritten_to_human(AUTOFIX_DISPLAY)
 
 
 class DefaultRewriteTest(unittest.TestCase):
