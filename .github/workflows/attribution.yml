@@ -1,6 +1,7 @@
 name: Attribution
 
-# Strips AI-attribution trailers from PR commit messages, then fails the check
+# Strips AI-attribution trailers and AI author/committer identities from PR
+# commits, drops Cursor cloud wrappers from the PR body, then fails the check
 # if any attribution credit remains (commits, title, or body).
 #
 # Why this exists
@@ -14,9 +15,17 @@ name: Attribution
 #
 # Two controls, one workflow
 # --------------------------
-# 1. strip-attribution.py rewrites removable trailer / footer lines on the PR
-#    branch (same-repo PRs only) and force-with-lease pushes the cleaned tip.
-# 2. check-attribution.py fails the job if any attribution credit remains —
+# 1. strip-attribution.py rewrites removable trailer / footer lines and AI
+#    author/committer identities on the PR branch (same-repo PRs only) and
+#    force-with-lease pushes the cleaned tip. Identity rewrite prefers a
+#    human Co-authored-by trailer already on the commit, else the PR opener
+#    via STRIP_AUTHOR_* in @users.noreply.github.com shape, else
+#    Jeremy Michael Cerda <jmcerda@users.noreply.github.com>. Do not
+#    default to @wilkesliberty.com (operator lock 2026-08-22 / DEV-414).
+# 2. Cursor cloud PR-body wrappers (CURSOR_AGENT_PR_BODY_* comments and the
+#    trailing cursor.com/agents footer) are stripped via gh api PATCH when
+#    present. The human-written summary is preserved.
+# 3. check-attribution.py fails the job if any attribution credit remains —
 #    including PR title/body and mid-subject prose the stripper will not touch.
 #
 # One file, three run modes
@@ -296,6 +305,14 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           BRANCH: ${{ github.head_ref }}
           ORIGINAL_HEAD: ${{ github.event.pull_request.head.sha }}
+          # Fallback human when a commit has an AI author/committer and no
+          # human Co-authored-by trailer. Must be @users.noreply.github.com
+          # (operator lock 2026-08-22): never @wilkesliberty.com. The script
+          # defaults to Jeremy Michael Cerda <jmcerda@users.noreply.github.com>
+          # when this pair is unset. Cursor already stamps the session
+          # initiator as Co-authored-by; this covers the rest.
+          STRIP_AUTHOR_NAME: ${{ github.event.pull_request.user.login }}
+          STRIP_AUTHOR_EMAIL: ${{ github.event.pull_request.user.login }}@users.noreply.github.com
         run: |
           set -euo pipefail
           python3 "$RUNNER_TEMP/trusted/strip-attribution.py" \
@@ -321,8 +338,52 @@ jobs:
           COUNT: ${{ steps.strip.outputs.count }}
         run: |
           set -euo pipefail
-          body="Removed AI attribution trailer(s) from **${COUNT}** commit(s) on this branch (standing order §1). Trees and author identity are unchanged; only the forbidden credit lines were dropped. Re-run of this check will confirm the tip is clean."
+          body="Removed AI attribution from **${COUNT}** commit(s) on this branch (standing order §1). Trees and author/committer dates are preserved. AI author/committer identities are rewritten to the human operator when a human Co-authored-by trailer or the PR opener is available. Re-run of this check will confirm the tip is clean."
           gh pr comment "$PR" --body "$body"
+
+      # Always before the scan (not only after a successful strip): Cursor
+      # cloud wrappers in the PR body are not an authorship claim the check
+      # will fail on, but they are credit chrome the operator did not write.
+      # Required mode stays scan-only. Only PATCH when the wrappers are
+      # present; the human-written summary is left intact. The staged body
+      # file is updated so the scan below sees the cleaned text. A PATCH
+      # failure is a warning — a courtesy write must not decide the check.
+      - name: Remove Cursor cloud wrappers from the PR body
+        if: steps.mode.outputs.mode != 'required'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import importlib.util
+          import json
+          import os
+          import pathlib
+
+          script = pathlib.Path(os.environ["RUNNER_TEMP"]) / "trusted" / "strip-attribution.py"
+          spec = importlib.util.spec_from_file_location("strip_attribution", script)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          src = pathlib.Path(os.environ["RUNNER_TEMP"]) / "pr-body.txt"
+          raw = src.read_text(encoding="utf-8")
+          cleaned = mod.clean_cursor_pr_body(raw)
+          if cleaned is None:
+              print("No Cursor cloud PR-body wrappers present")
+              raise SystemExit(0)
+
+          src.write_text(cleaned, encoding="utf-8")
+          payload = pathlib.Path(os.environ["RUNNER_TEMP"]) / "pr-body-patch.json"
+          payload.write_text(json.dumps({"body": cleaned}), encoding="utf-8")
+          print("Cleaned Cursor cloud PR-body wrappers locally")
+          PY
+          if [ -f "$RUNNER_TEMP/pr-body-patch.json" ]; then
+            if ! gh api --method PATCH "repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
+                  --input "$RUNNER_TEMP/pr-body-patch.json"; then
+              echo "::warning::could not PATCH the PR body to drop Cursor cloud wrappers"
+            fi
+          fi
 
       # Always scan — including when strip was skipped (required mode, fork PR)
       # or a no-op. HEAD is the PR tip, rewritten in place by strip when that
