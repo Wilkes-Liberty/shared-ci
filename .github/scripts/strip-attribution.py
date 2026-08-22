@@ -23,7 +23,13 @@ Scope:
          (the workflow passes the PR opener in that shape).
       3. if the author slot is already a human, that human (so an AI
          committer on a human-authored commit can be restamped).
-      4. ``Jeremy Michael Cerda <jmcerda@users.noreply.github.com>``.
+      4. ``Jeremy Michael Cerda <jmcerda@users.noreply.github.com>``, but
+         only when the dirty author is *not* an unambiguous Autofix /
+         copilot identity. Hosted Cursor Agent commits may use this
+         default. ``copilot-swe-agent[bot]`` / Copilot Autofix without a
+         human trailer and without a safe ``STRIP_AUTHOR_*`` stays dirty
+         and the check fails closed — do not invent Jeremy as the
+         Autofix author.
     Standing-orders ``@wilkesliberty.com`` is used only when we actually
     control identity at commit time. It is not the strip rewrite default
     and is not accepted via ``STRIP_AUTHOR_*`` — those must be the
@@ -211,6 +217,18 @@ def identity_is_ai(name: str, email: str) -> bool:
     return find_identity_attribution(((name, email), ("", ""))) is not None
 
 
+def identity_is_unambiguous_ai(name: str, email: str) -> bool:
+    """True for copilot / Autofix / swe-agent and other unambiguous vendors.
+
+    These must not receive DEFAULT_REWRITE_HUMAN. Without a human
+    Co-authored-by or a safe STRIP_AUTHOR_* they stay dirty.
+    """
+    identity = " ".join(v for v in (name, email) if v)
+    if not identity:
+        return False
+    return AI_IDENTITY_UNAMBIGUOUS.search(identity) is not None
+
+
 def human_coauthors(message: str) -> List[Tuple[str, str]]:
     """Human ``Co-authored-by`` trailers on a commit message, oldest first."""
     raw = message.replace("\r\n", "\n").replace("\r", "\n")
@@ -250,8 +268,10 @@ def resolve_replacement_human(message: str, meta: dict) -> Optional[Tuple[str, s
     Operator lock 2026-08-22 (DEV-414): prefer a human Co-authored-by
     already on the commit; else a noreply-shaped STRIP_AUTHOR_* (PR
     opener); else an already-human author slot; else
-    DEFAULT_REWRITE_HUMAN (Jeremy noreply). Never default to
-    @wilkesliberty.com.
+    DEFAULT_REWRITE_HUMAN (Jeremy noreply) for hosted Cursor-like
+    identities. Unambiguous Autofix / copilot without a human trailer
+    or safe env is left alone so the check fails closed. Never default
+    to @wilkesliberty.com.
     """
     humans = human_coauthors(message)
     if humans:
@@ -265,6 +285,10 @@ def resolve_replacement_human(message: str, meta: dict) -> Optional[Tuple[str, s
         and not identity_is_ai(meta["author_name"], meta["author_email"])
     ):
         return (meta["author_name"], meta["author_email"])
+    if identity_is_unambiguous_ai(
+        meta.get("author_name") or "", meta.get("author_email") or ""
+    ):
+        return None
     return DEFAULT_REWRITE_HUMAN
 
 

@@ -23,9 +23,13 @@ All notable changes to shared-ci. One entry per merged PR.
   PATCHes the PR body to drop Cursor cloud wrapper comments and the
   trailing `cursor.com/agents` footer when those markers are present,
   leaving the human-written summary intact. The strip suite pins a
-  Copilot Autofix / `copilot-swe-agent[bot]` tip (authored and committed
-  as that identity, human Co-authored-by already on the commit) so the
-  rewrite path restamps HEAD, not only Cursor Agent mid-range commits.
+  Copilot Autofix / `copilot-swe-agent[bot]` tip rewrite (authored and
+  committed as that identity with a human Co-authored-by → restamp to
+  that human, check exits 0). The same Autofix author with no human
+  trailer and no safe `STRIP_AUTHOR_*` stays dirty and fails closed —
+  the Cursor Jeremy-noreply default is not applied to unambiguous
+  Autofix/copilot. A committer-only Autofix stamp on a human author
+  is restamped to that human.
   Callers stay on `@v1`; the operator retags `v1` / cuts `v1.3.0` after
   this merges.
 

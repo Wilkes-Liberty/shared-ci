@@ -160,6 +160,9 @@ class PatternSyncTest(unittest.TestCase):
             strip.DEFAULT_REWRITE_HUMAN[1].endswith("@wilkesliberty.com")
         )
         self.assertFalse(strip.identity_is_ai(*strip.DEFAULT_REWRITE_HUMAN))
+        self.assertTrue(strip.identity_is_unambiguous_ai(*AUTOFIX))
+        self.assertTrue(strip.identity_is_unambiguous_ai(*AUTOFIX_DISPLAY))
+        self.assertFalse(strip.identity_is_unambiguous_ai(*CURSOR))
 
     def test_shared_pattern_strings_match(self):
         check = load_script("check_attribution", CHECK)
@@ -236,20 +239,17 @@ class Vault183ShapeTest(unittest.TestCase):
         self.assertEqual(check.returncode, CLEAN, check.stdout + check.stderr)
 
 
-class AutofixTipTest(unittest.TestCase):
-    """Copilot Autofix / copilot-swe-agent[bot] as the PR tip.
+class AutofixTipRewriteTest(unittest.TestCase):
+    """Mirror of Vault183ShapeTest for Copilot Autofix / SWE-agent.
 
-    Cursor Agent coverage lives in Vault183ShapeTest. The gap this pins is
-    an Autofix commit sitting on HEAD: authored and committed as the
-    Copilot coding-agent identity, with the operator already on the
-    commit as a human Co-authored-by. Strip must restamp that tip, not
-    only mid-range Cursor commits, or the check stays red on the tip.
+    Not an identity-scan-only pin. The tip is authored and committed as
+    copilot-swe-agent[bot] (or the Copilot Autofix display name). After
+    strip, author and committer must be the human from Co-authored-by
+    and check-attribution must exit 0.
     """
 
     def setUp(self):
         self.repo = Repo()
-        # A human commit under the tip, so Autofix is HEAD rather than
-        # the only commit in the range.
         self.repo.commit("human work on the branch")
         self.msg = (
             "Apply Autofix suggestion\n\n"
@@ -259,9 +259,10 @@ class AutofixTipTest(unittest.TestCase):
     def tearDown(self):
         self.repo.cleanup()
 
-    def _assert_tip_rewritten_to_human(self, identity):
+    def _rewrite_tip(self, identity):
         self.repo.commit(self.msg, identity=identity, committer=identity)
         self.assertEqual(self.repo.log_identity()["author_name"], identity[0])
+        self.assertEqual(self.repo.log_identity()["committer_name"], identity[0])
         tree_before = self.repo.tree()
         result = self.repo.strip()
         self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
@@ -273,12 +274,65 @@ class AutofixTipTest(unittest.TestCase):
         self.assertEqual(self.repo.tree(), tree_before)
         check = self.repo.check()
         self.assertEqual(check.returncode, CLEAN, check.stdout + check.stderr)
+        return result
 
-    def test_copilot_swe_agent_tip_with_human_coauthor_passes_check(self):
-        self._assert_tip_rewritten_to_human(AUTOFIX)
+    def test_copilot_swe_agent_tip_with_human_coauthor_is_rewritten(self):
+        self._rewrite_tip(AUTOFIX)
 
-    def test_copilot_autofix_display_name_tip_with_human_coauthor_passes_check(self):
-        self._assert_tip_rewritten_to_human(AUTOFIX_DISPLAY)
+    def test_copilot_autofix_display_name_tip_with_human_coauthor_is_rewritten(self):
+        self._rewrite_tip(AUTOFIX_DISPLAY)
+
+
+class AutofixTipFailClosedTest(unittest.TestCase):
+    """Mirror of FailClosedTest for Autofix.
+
+    An Autofix / copilot-swe-agent[bot] author with no human
+    Co-authored-by and no safe STRIP_AUTHOR_* must stay dirty. The
+    Cursor Jeremy-noreply default must not invent an Autofix author.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+        self.repo.commit("human work on the branch")
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_autofix_author_without_human_or_safe_env_stays_dirty(self):
+        self.repo.commit("Apply Autofix suggestion", identity=AUTOFIX, committer=AUTOFIX)
+        before = self.repo.log_identity()
+        result = self.repo.strip()
+        self.assertEqual(result.returncode, CLEAN, result.stderr)
+        self.assertEqual(self.repo.log_identity(), before)
+        self.assertEqual(self.repo.log_identity()["author_name"], AUTOFIX[0])
+        self.assertIn("fail closed", result.stdout)
+        check = self.repo.check()
+        self.assertEqual(check.returncode, DIRTY, check.stdout)
+        self.assertIn("AI author identity", check.stdout)
+
+    def test_autofix_author_with_unsafe_company_env_stays_dirty(self):
+        self.repo.commit("Apply Autofix suggestion", identity=AUTOFIX)
+        result = self.repo.strip(extra_env={
+            "STRIP_AUTHOR_NAME": HUMAN[0],
+            "STRIP_AUTHOR_EMAIL": HUMAN[1],
+        })
+        self.assertEqual(self.repo.log_identity()["author_name"], AUTOFIX[0])
+        self.assertIn("fail closed", result.stdout)
+        self.assertEqual(self.repo.check().returncode, DIRTY)
+
+    def test_autofix_committer_on_human_author_is_rewritten(self):
+        """Server-side Autofix can leave copilot only in the committer slot."""
+        self.repo.commit(
+            "apply a suggestion",
+            identity=HUMAN,
+            committer=AUTOFIX,
+        )
+        result = self.repo.strip()
+        self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
+        ident = self.repo.log_identity()
+        self.assertEqual((ident["author_name"], ident["author_email"]), HUMAN)
+        self.assertEqual((ident["committer_name"], ident["committer_email"]), HUMAN)
+        self.assertEqual(self.repo.check().returncode, CLEAN)
 
 
 class DefaultRewriteTest(unittest.TestCase):
