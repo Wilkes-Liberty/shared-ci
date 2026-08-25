@@ -4,6 +4,14 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+- **Strip rewrites through merge commits.** A merge of `master` into a
+  feature branch no longer makes `strip-attribution.py` return clean
+  without touching the dirty commits underneath (the connector #166
+  miss: Bugbot as `Cursor Agent`, then a conflict-resolution merge,
+  then a red attribution check). The first-parent chain is replayed,
+  including merges; second parents are remapped when they sit on that
+  walk. The check then sees the rewritten tip.
+
 - **Strip rewrites AI author/committer identities before the check.** Hosted
   Cursor Cloud Agents always commit as `Cursor Agent <cursoragent@cursor.com>`
   with the session initiator as `Co-authored-by`, and there is no dashboard
