@@ -50,7 +50,11 @@ Scope:
   * Does **not** rewrite mid-subject prose like "AI-assisted refactor" —
     those still fail the check for a human reword (auto-rewriting subjects
     is too lossy).
-  * Does **not** rewrite merge commits (linear history only).
+  * Rewrites the first-parent chain, including merge commits. A merge of
+    ``master`` into a dirty feature branch no longer disables the rewrite
+    (that miss left Cursor Agent on the commit and failed the check).
+    Second parents are remapped when they sit on the same first-parent
+    walk; otherwise they are kept.
 
 Usage:
   strip-attribution.py --base <sha> --head <sha> [--push] [--dry-run]
@@ -443,10 +447,17 @@ def clean_message(message: str) -> Tuple[str, List[str]]:
 
 
 def commits_oldest_first(base: str, head: str) -> List[Tuple[str, str]]:
-    """(sha, full message) for each non-merge commit in base..head, oldest first."""
+    """(sha, full message) for each first-parent commit in base..head, oldest first.
+
+    Includes merge commits so a merge of the base branch cannot hide a dirty
+    non-merge sitting under it.
+    """
     sep = "\x1e"
     out = git(
-        ["log", "--reverse", "--topo-order", "--no-merges", f"--format=%H{sep}%B%x00", f"{base}..{head}"]
+        [
+            "log", "--reverse", "--first-parent",
+            f"--format=%H{sep}%B%x00", f"{base}..{head}",
+        ]
     ).stdout
     commits: List[Tuple[str, str]] = []
     for record in out.split("\x00"):
@@ -477,14 +488,18 @@ def commit_meta(sha: str) -> dict:
     }
 
 
-def first_parent(sha: str) -> Optional[str]:
+def commit_parents(sha: str) -> List[str]:
+    """All parent shas, first parent first."""
     out = git(["rev-list", "--parents", "-n", "1", sha]).stdout.strip().split()
-    if len(out) < 2:
-        return None
-    return out[1]
+    return out[1:]
 
 
-def write_commit(tree: str, parent: Optional[str], message: str, meta: dict) -> str:
+def first_parent(sha: str) -> Optional[str]:
+    parents = commit_parents(sha)
+    return parents[0] if parents else None
+
+
+def write_commit(tree: str, parents: List[str], message: str, meta: dict) -> str:
     env = os.environ.copy()
     env.update(
         {
@@ -497,8 +512,9 @@ def write_commit(tree: str, parent: Optional[str], message: str, meta: dict) -> 
         }
     )
     args = ["commit-tree", tree]
-    if parent:
-        args.extend(["-p", parent])
+    for parent in parents:
+        if parent:
+            args.extend(["-p", parent])
     proc = subprocess.run(
         ["git", *args],
         input=message,
@@ -544,17 +560,18 @@ def plan_commit(sha: str, message: str) -> dict:
 
 
 def rewrite_range(base: str, head: str) -> Tuple[str, int, List[str]]:
-    """Rewrite dirty messages and AI identities in base..head.
+    """Rewrite dirty messages and AI identities on the first-parent chain.
 
-    Returns (new_head, n_stripped, notes).
+    Merge commits are recreated with remapped parents so a merge of the
+    base branch cannot hide a dirty child. Returns (new_head, n_stripped,
+    notes).
     """
     commits = commits_oldest_first(base, head)
     if not commits:
         return head, 0, []
 
-    # Map old sha -> new sha for parent retargeting along the linear chain.
-    # For non-merge commits the first parent is the previous rewritten tip when
-    # the commit sits on the PR branch lineage.
+    # Map old sha -> new sha for parent retargeting along the first-parent
+    # chain. Merge second-parents are remapped when they appear in this walk.
     mapping: dict = {}
     notes: List[str] = []
     stripped = 0
@@ -563,17 +580,18 @@ def rewrite_range(base: str, head: str) -> Tuple[str, int, List[str]]:
     # Walk oldest → newest so parents exist before children.
     for sha, message in commits:
         plan = plan_commit(sha, message)
-        old_parent = first_parent(sha)
-        new_parent = mapping.get(old_parent, old_parent) if old_parent else None
+        old_parents = commit_parents(sha)
+        new_parents = [mapping.get(parent, parent) for parent in old_parents]
         meta = plan["meta"]
         new_meta = plan["new_meta"]
         cleaned = plan["cleaned"]
+        parents_moved = new_parents != old_parents
 
         if not plan["message_changed"] and not plan["identity_changed"]:
             # Message and identity unchanged. Still may need a new commit if
-            # parent moved.
-            if old_parent and new_parent != old_parent:
-                new_sha = write_commit(meta["tree"], new_parent, cleaned, meta)
+            # a parent moved (typical: merge sitting on a rewritten child).
+            if parents_moved:
+                new_sha = write_commit(meta["tree"], new_parents, cleaned, meta)
                 mapping[sha] = new_sha
                 new_tip = new_sha
             else:
@@ -581,7 +599,7 @@ def rewrite_range(base: str, head: str) -> Tuple[str, int, List[str]]:
                 new_tip = sha
             continue
 
-        new_sha = write_commit(new_meta["tree"], new_parent, cleaned, new_meta)
+        new_sha = write_commit(new_meta["tree"], new_parents, cleaned, new_meta)
         mapping[sha] = new_sha
         new_tip = new_sha
         stripped += 1
@@ -650,16 +668,6 @@ def main() -> int:
         )
         print(exc.stderr or "", file=sys.stderr)
         return 2
-
-    merges = git(["rev-list", "--merges", f"{base_sha}..{head_sha}"]).stdout.strip()
-    if merges:
-        print(
-            f"::warning::strip-attribution: merge commits detected in {short(base_sha)}..{short(head_sha)}; "
-            "auto-rewrite only supports linear history. Please rebase to a linear branch and re-run."
-        )
-        set_output("stripped", "false")
-        set_output("count", "0")
-        return 0
 
     commits = commits_oldest_first(base_sha, head_sha)
     dirty = []

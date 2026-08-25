@@ -480,5 +480,54 @@ class PrBodyCleanupTest(unittest.TestCase):
         self.assertIsNone(self.strip.clean_cursor_pr_body(""))
 
 
+class MergeCommitRewriteTest(unittest.TestCase):
+    """Merging master into a dirty feature branch must not disable the rewrite.
+
+    The connector #166 failure: Bugbot committed as Cursor Agent, then a
+    merge of master into the feature branch made strip return 0 without
+    rewriting. check-attribution then failed. First-parent replay keeps the
+    merge and restamps the dirty non-merge.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_cursor_agent_under_a_merge_is_rewritten_and_merge_is_kept(self):
+        base = self.repo.base
+        self.repo._git("branch", "side")
+        msg = (
+            "return the draft body\n\n"
+            + trailer(f"{HUMAN_NOREPLY[0]} <{HUMAN_NOREPLY[1]}>")
+        )
+        self.repo.commit(msg, identity=CURSOR, committer=CURSOR)
+        self.repo._git("checkout", "-q", "side")
+        self.repo.commit("mainline change", filename="main.txt")
+        side = self.repo._git("rev-parse", "HEAD").stdout.strip()
+        self.repo._git("checkout", "-q", "master")
+        self.repo._git("merge", "--no-ff", "-m", "Merge side into feature", side)
+        self.assertTrue(
+            self.repo._git("rev-list", "--merges", f"{base}..HEAD").stdout.strip()
+        )
+
+        result = self.repo.strip()
+        self.assertEqual(result.returncode, CLEAN, result.stderr + result.stdout)
+        self.assertNotIn("auto-rewrite only supports linear history", result.stdout)
+
+        parents = self.repo._git("rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+        self.assertEqual(len(parents), 3, "tip must remain a merge commit")
+
+        first_parent = parents[1]
+        ident_line = self.repo._git(
+            "log", "-1", "--format=%an%x1f%ae%x1f%cn%x1f%ce", first_parent
+        ).stdout.rstrip("\n")
+        an, ae, cn, ce = ident_line.split("\x1f")
+        self.assertEqual((an, ae), HUMAN_NOREPLY)
+        self.assertEqual((cn, ce), HUMAN_NOREPLY)
+        self.assertEqual(self.repo.check().returncode, CLEAN)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

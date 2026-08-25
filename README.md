@@ -25,8 +25,10 @@ keeps authorship credit that way on every pull request:
    Jeremy Michael Cerda `<jmcerda@users.noreply.github.com>`). Trees and
    dates are preserved. `@wilkesliberty.com` is not the strip rewrite
    default (operator lock 2026-08-22 / DEV-414). Same-repo PRs only;
-   then force-with-lease pushes the cleaned tip. Cursor cloud wrappers
-   in the PR body are removed when present.
+   then force-with-lease pushes the cleaned tip. A merge of the base
+   branch into the feature branch does not disable the rewrite — the
+   first-parent chain, including that merge, is replayed. Cursor cloud
+   wrappers in the PR body are removed when present.
 2. **Fails** the check if any attribution credit remains: commit messages,
    commit author/committer identities, PR title, or PR body.
 
