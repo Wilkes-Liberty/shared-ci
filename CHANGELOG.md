@@ -4,6 +4,8 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-25
+
 - **Strip rewrites through merge commits.** A merge of `master` into a
   feature branch no longer makes `strip-attribution.py` return clean
   without touching the dirty commits underneath (the connector #166
