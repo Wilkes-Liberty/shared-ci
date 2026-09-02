@@ -44,9 +44,10 @@ Scope:
     GIT_COMMITTER_DATE stays the original committer date. A human committer
     is left untouched (server-side "Commit suggestion" on someone else's
     work must not overwrite that human).
-  * ``clean_cursor_pr_body`` removes Cursor cloud wrapper markers from a PR
-    body string. The workflow PATCHes GitHub when those markers are present;
-    this script does not talk to the API.
+  * ``clean_cursor_pr_body`` removes Cursor cloud wrapper markers and Bugbot
+    ``CURSOR_SUMMARY`` blocks from a PR body string. The workflow PATCHes
+    GitHub when those markers are present; this script does not talk to the
+    API.
   * Does **not** rewrite mid-subject prose like "AI-assisted refactor" —
     those still fail the check for a human reword (auto-rewriting subjects
     is too lossy).
@@ -215,6 +216,18 @@ CURSOR_PR_FOOTER = re.compile(
     re.I,
 )
 
+# Bugbot appends this block in place on `edited` / `synchronize`. Its prose
+# can contain the same authorship-marker hits the body scanner flags, even
+# when the human-written body does not (shared-ci#16 / webcms#828). Strip
+# the whole block.
+# Greedy on purpose: Bugbot's own overview often quotes the marker pair
+# inside the block; a non-greedy match would stop at that inner end and
+# leave an orphaned tail that still trips the scanner.
+CURSOR_SUMMARY_BLOCK = re.compile(
+    r"<!--\s*CURSOR_SUMMARY\s*-->[\s\S]*<!--\s*/CURSOR_SUMMARY\s*-->",
+    re.I,
+)
+
 
 def identity_is_ai(name: str, email: str) -> bool:
     """True when this name+email pair would fail the check's identity scan."""
@@ -332,22 +345,27 @@ def identity_changed(old: dict, new: dict) -> bool:
 
 
 def clean_cursor_pr_body(body: str) -> Optional[str]:
-    """Return a cleaned PR body if Cursor cloud wrappers are present, else None.
+    """Return a cleaned PR body if Cursor chrome is present, else None.
 
-    Removes the BEGIN/END HTML comments and a trailing
-    ``<div>…cursor.com/agents…</div>`` footer. The human-written summary
-    between the markers is preserved. Returns None when no wrapper is
-    present so callers can no-op without a GitHub write.
+    Removes the BEGIN/END HTML comments, a trailing
+    ``<div>…cursor.com/agents…</div>`` footer, and Bugbot
+    ``<!-- CURSOR_SUMMARY -->…<!-- /CURSOR_SUMMARY -->`` blocks. The
+    human-written summary outside those markers is preserved. Returns None
+    when none of those markers are present so callers can no-op without a
+    GitHub write.
     """
     if not body:
         return None
     has_begin = CURSOR_PR_BODY_BEGIN in body
     has_end = CURSOR_PR_BODY_END in body
     has_footer = CURSOR_PR_FOOTER.search(body) is not None
-    if not (has_begin or has_end or has_footer):
+    has_summary = CURSOR_SUMMARY_BLOCK.search(body) is not None
+    if not (has_begin or has_end or has_footer or has_summary):
         return None
     cleaned = body.replace(CURSOR_PR_BODY_BEGIN, "").replace(CURSOR_PR_BODY_END, "")
     cleaned = CURSOR_PR_FOOTER.sub("", cleaned)
+    cleaned = CURSOR_SUMMARY_BLOCK.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"^\s*\n", "", cleaned)
     cleaned = re.sub(r"\n[ \t]*\Z", "\n", cleaned)
     if cleaned and not cleaned.endswith("\n"):

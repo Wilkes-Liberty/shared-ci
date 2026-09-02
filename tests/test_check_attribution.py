@@ -431,6 +431,49 @@ class HarnessFailureTest(unittest.TestCase):
                          "a traceback is not a finding")
 
 
+class CursorSummaryBodyTest(unittest.TestCase):
+    """Bugbot CURSOR_SUMMARY prose must not fail the body scan (shared-ci#16).
+
+    The stripper removes the block before the scan; this pins that the raw
+    block would be dirty and the cleaned body is clean.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+        import importlib.util
+        strip_path = Path(__file__).resolve().parent.parent / ".github" / "scripts" / "strip-attribution.py"
+        spec = importlib.util.spec_from_file_location("strip_attribution", strip_path)
+        self.strip = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.strip)
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_raw_cursor_summary_with_ai_generated_fails(self):
+        self.repo.commit("a normal change")
+        body = (
+            "Human-written PR summary with no authorship claim.\n"
+            "\n"
+            "<!-- CURSOR_SUMMARY -->\n"
+            "> Changes fail-closed behavior for AI-generated public files.\n"
+            "<!-- /CURSOR_SUMMARY -->\n"
+        )
+        self.assertEqual(self.repo.check(body=body).returncode, DIRTY)
+
+    def test_cleaned_cursor_summary_body_passes(self):
+        self.repo.commit("a normal change")
+        body = (
+            "Human-written PR summary with no authorship claim.\n"
+            "\n"
+            "<!-- CURSOR_SUMMARY -->\n"
+            "> Changes fail-closed behavior for AI-generated public files.\n"
+            "<!-- /CURSOR_SUMMARY -->\n"
+        )
+        cleaned = self.strip.clean_cursor_pr_body(body)
+        self.assertIsNotNone(cleaned)
+        self.assertEqual(self.repo.check(body=cleaned).returncode, CLEAN)
+
+
 class AnnotationEscapingTest(unittest.TestCase):
     """Findings quote attacker-controlled text into `::error::` annotations.
 

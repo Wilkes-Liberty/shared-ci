@@ -4,6 +4,16 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+- **Strip Bugbot `CURSOR_SUMMARY` blocks from PR bodies before the
+  attribution scan.** Cursor Bugbot appends a review block in place; its
+  prose can contain the same authorship-marker hits the body scanner
+  flags, even when the human-written body does not (shared-ci#16 /
+  webcms#828). `clean_cursor_pr_body` now removes that block (greedy
+  match, so a quoted marker pair inside Bugbot's own overview cannot
+  orphan a tail) alongside the existing Cursor cloud wrappers and
+  `cursor.com/agents` footer, and the workflow PATCHes the cleaned body
+  the same way.
+
 ## [1.3.0] - 2026-08-25
 
 - **Strip rewrites through merge commits.** A merge of `master` into a
