@@ -22,9 +22,11 @@ name: Attribution
 #    via STRIP_AUTHOR_* in @users.noreply.github.com shape, else
 #    Jeremy Michael Cerda <jmcerda@users.noreply.github.com>. Do not
 #    default to @wilkesliberty.com (operator lock 2026-08-22 / DEV-414).
-# 2. Cursor cloud PR-body wrappers (CURSOR_AGENT_PR_BODY_* comments and the
-#    trailing cursor.com/agents footer) are stripped via gh api PATCH when
-#    present. The human-written summary is preserved.
+# 2. Cursor cloud PR-body wrappers (CURSOR_AGENT_PR_BODY_* comments, the
+#    trailing cursor.com/agents footer, and Bugbot CURSOR_SUMMARY blocks)
+#    are stripped via gh api PATCH when present. The human-written summary
+#    is preserved. Bugbot summaries can contain the same authorship-marker
+#    hits the body scanner flags (shared-ci#16).
 # 3. check-attribution.py fails the job if any attribution credit remains —
 #    including PR title/body and mid-subject prose the stripper will not touch.
 #
@@ -342,9 +344,10 @@ jobs:
           gh pr comment "$PR" --body "$body"
 
       # Always before the scan (not only after a successful strip): Cursor
-      # cloud wrappers in the PR body are not an authorship claim the check
-      # will fail on, but they are credit chrome the operator did not write.
-      # Required mode stays scan-only. Only PATCH when the wrappers are
+      # cloud wrappers and Bugbot CURSOR_SUMMARY blocks are credit chrome
+      # the operator did not write. Bugbot summaries can also trip the
+      # body scanner (e.g. "AI-generated" in a review note — shared-ci#16).
+      # Required mode stays scan-only. Only PATCH when those markers are
       # present; the human-written summary is left intact. The staged body
       # file is updated so the scan below sees the cleaned text. A PATCH
       # failure is a warning — a courtesy write must not decide the check.

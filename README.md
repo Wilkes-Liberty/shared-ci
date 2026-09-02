@@ -28,7 +28,8 @@ keeps authorship credit that way on every pull request:
    then force-with-lease pushes the cleaned tip. A merge of the base
    branch into the feature branch does not disable the rewrite — the
    first-parent chain, including that merge, is replayed. Cursor cloud
-   wrappers in the PR body are removed when present.
+   wrappers and Bugbot `CURSOR_SUMMARY` blocks in the PR body are removed
+   when present.
 2. **Fails** the check if any attribution credit remains: commit messages,
    commit author/committer identities, PR title, or PR body.
 
