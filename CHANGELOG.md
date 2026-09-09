@@ -4,6 +4,8 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-09
+
 - **Strip Bugbot `CURSOR_SUMMARY` blocks from PR bodies before the
   attribution scan.** Cursor Bugbot appends a review block in place; its
   prose can contain the same authorship-marker hits the body scanner
