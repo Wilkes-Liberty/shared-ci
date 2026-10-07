@@ -1,0 +1,28 @@
+name: Changelog
+
+# Reference caller for the shared changelog-fragments workflow. The
+# implementation — fragment rule, structure check, and the compile script
+# the release-finalize commit runs — lives in changelog-fragments.yml.
+# Other repositories call the tagged copy and pass nothing they do not
+# need to override:
+#
+#   jobs:
+#     changelog:
+#       uses: Wilkes-Liberty/shared-ci/.github/workflows/changelog-fragments.yml@v1
+#
+# This file uses a relative path so the reference exercises the commit
+# under test. A consuming repository stays on `@v1` until that alias is
+# moved; do not point a caller at a branch. Do not add logic here.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    uses: ./.github/workflows/changelog-fragments.yml

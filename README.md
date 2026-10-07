@@ -72,6 +72,71 @@ jobs:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/attribution.yml@v1
 ```
 
+### changelog-fragments.yml — one fragment per pull request
+
+Concurrent pull requests used to insert bullets under the same
+`## [Unreleased]` list in `CHANGELOG.md`. Adjacent lines conflict, the
+conflict fix is another push, and the push reruns CI. A pull request
+labelled `changelog` adds one file instead:
+
+```markdown
+<!-- changelog.d/20-changelog-fragments.md -->
+---
+section: Added
+---
+**What changed, in the same voice as today's release notes.** The Keep a
+Changelog section (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
+`Security`) is the front matter. The body is the bullet.
+```
+
+Unlabelled pull requests pass. That is the org's opt-in rule: an entry is required only when the pull request carries the `changelog` label. Dependabot is exempt. The structure check is not opt-in. It rejects a fragment the compiler cannot read, a duplicate or out-of-order `###` heading, and a release heading that disappeared. It runs on push to the default branch as well as on pull requests, because the bad merge only exists after the second pull request lands.
+
+The release-finalize commit compiles the fragments into the versioned heading `release.yml` already extracts, then deletes them. Notes already under `[Unreleased]` are carried into that version section ahead of the fragment groups, and `[Unreleased]` is left empty. An `-rc.*` tag whose unreleased section is empty already falls back to `## [X.Y.Z]`.
+
+In this repository:
+
+```sh
+python3 .github/scripts/changelog-fragments.py compile \
+  --version 1.4.0 --date 2026-10-07
+```
+
+In a caller, fetch the script from the same tag the workflow is pinned to so the checker and the compiler cannot drift:
+
+```sh
+gh api "repos/Wilkes-Liberty/shared-ci/contents/.github/scripts/changelog-fragments.py?ref=v1" \
+  -H "Accept: application/vnd.github.raw" > /tmp/changelog-fragments.py
+python3 /tmp/changelog-fragments.py compile --version 1.4.0 --date 2026-10-07
+```
+
+This repository is the reference caller (`.github/workflows/changelog.yml`), and it calls the workflow by relative path so a change here is what CI runs. Every other repository pins the tag:
+
+```yaml
+# .github/workflows/changelog.yml
+name: Changelog
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  changelog:
+    uses: Wilkes-Liberty/shared-ci/.github/workflows/changelog-fragments.yml@v1
+```
+
+A caller that already allows headings beyond the Keep a Changelog six passes them in order, after `Security`:
+
+```yaml
+jobs:
+  changelog:
+    uses: Wilkes-Liberty/shared-ci/.github/workflows/changelog-fragments.yml@v1
+    with:
+      extra-sections: Docs,Documentation,Dependencies,Tests
+```
+
+Do not adopt this in a consuming repository until `v1` points at a release that contains it. The connector's opt-out (`no-changelog` on every pull request) is a deliberate exception and is not this workflow.
+
 ## Versioning
 
 Consumers pin the floating major tag (`@v1`). Exact releases are tagged
