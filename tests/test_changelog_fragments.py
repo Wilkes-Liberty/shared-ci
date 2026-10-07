@@ -378,6 +378,49 @@ class MergeAndEntryTest(unittest.TestCase):
         two = self.box.run("check", "--require-entry", "--base", base)
         self.assertEqual(two.returncode, 1, two.stdout)
 
+    def test_hidden_or_misnamed_file_does_not_count_as_the_required_fragment(self):
+        self.box.write("CHANGELOG.md", BASE)
+        base = self.box.commit_all("base")
+        for name in (".bypass", "readme.md"):
+            with self.subTest(name=name):
+                directory = self.box.repo / "changelog.d"
+                if directory.exists():
+                    shutil.rmtree(directory)
+                self.box.write(f"changelog.d/{name}", "not a fragment\n")
+                self.box.commit_all(f"only {name}")
+                result = self.box.run("check", "--require-entry", "--base", base)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("added 0 fragment", result.stdout)
+
+        directory = self.box.repo / "changelog.d"
+        if directory.exists():
+            shutil.rmtree(directory)
+        self.box.write("changelog.d/.gitkeep", "")
+        self.box.write("changelog.d/20-one.md", fragment("Changed", "One entry."))
+        self.box.commit_all("real fragment beside a hidden file")
+        kept = self.box.run("check", "--require-entry", "--base", base)
+        self.assertEqual(kept.returncode, 0, kept.stdout + kept.stderr)
+
+    def test_deleting_a_hidden_file_is_not_a_release_compile(self):
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("changelog.d/.bypass", "not a fragment\n")
+        self.box.write("changelog.d/20-keep.md", fragment("Added", "Still waiting."))
+        base = self.box.commit_all("base")
+        (self.box.repo / "changelog.d" / ".bypass").unlink()
+        text = (self.box.repo / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.box.write(
+            "CHANGELOG.md",
+            text.replace(
+                "## [Unreleased]\n",
+                "## [Unreleased]\n\n## [1.4.0] - 2026-10-07\n\n- not from a fragment\n",
+            ),
+        )
+        self.box.commit_all("heading without consuming fragments")
+        result = self.box.run("check", "--require-entry", "--base", base)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("deleted 0", result.stdout)
+        self.assertTrue((self.box.repo / "changelog.d" / "20-keep.md").is_file())
+
     def test_fragment_pr_that_also_edits_the_changelog_fails(self):
         self.box.write("CHANGELOG.md", BASE)
         base = self.box.commit_all("base")

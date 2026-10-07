@@ -380,12 +380,26 @@ def parse_name_status(blob: str) -> list[tuple[str, str, str | None]]:
     return records
 
 
+def compilable_fragment_name(name: str) -> bool:
+    """True when ``load_fragments`` would fold this filename into a release.
+
+    Hidden names are skipped, and any other name that is not
+    ``<key>-<slug>.md`` is a structure error rather than an entry. The
+    labelled-PR rule has to use that same set. Counting a hidden file as
+    the one required fragment lets the pull request pass with nothing the
+    compiler keeps, and counting a hidden deletion as a consumed fragment
+    lets a release heading pass while real entries stay uncompiled.
+    """
+    if not name or name.startswith(".") or "/" in name:
+        return False
+    return fragment_filename_error(name) is None
+
+
 def is_fragment_path(path: str, fragments: str) -> bool:
     prefix = fragments.strip("/") + "/"
     if not path.startswith(prefix):
         return False
-    rest = path[len(prefix) :]
-    return rest != "" and "/" not in rest
+    return compilable_fragment_name(path[len(prefix) :])
 
 
 def entry_errors(
