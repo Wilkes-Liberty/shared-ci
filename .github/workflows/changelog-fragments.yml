@@ -1,0 +1,195 @@
+name: Changelog fragments
+
+# One implementation of the changelog gate for every repository.
+#
+# Why fragments
+# -------------
+# Each caller used to require a bullet under the same `## [Unreleased]` list.
+# Two pull requests that both add one conflict on adjacent lines. The conflict
+# fix is a push, and the push reruns that repository's CI. GitHub's merge
+# button ignores a custom merge driver, so `merge=union` never applied.
+# A labelled pull request now adds `changelog.d/<key>-<slug>.md` instead.
+# Different files merge in either order.
+#
+# Two jobs, two gates — the distinction is the one infra and webcms already
+# drew, and it is load-bearing:
+#
+#   fragment   "was an entry written?" Opt-in, DEV-69: only a pull request
+#              carrying the `changelog` label (input `label`) must add exactly
+#              one new fragment and leave CHANGELOG.md alone. Dependabot is
+#              exempt; its notes are decided at release, not per bump.
+#              Requiring an entry by default was tried org-wide and reverted.
+#              Do not invert this without superseding DEV-69.
+#              The release-finalize commit is the other shape that passes:
+#              CHANGELOG.md gains `## [X.Y.Z] - YYYY-MM-DD` and the fragments
+#              that were compiled are deleted.
+#
+#   structure  "is the changelog well formed?" Ungated on purpose. Duplicate
+#              or misordered `###` headings, and a deleted release heading,
+#              are produced by merging two pull requests that each looked
+#              fine. A label gate would be green in exactly that case.
+#              This job also runs on push to the default branch when the
+#              caller triggers on push: a pull request is validated against
+#              its own merge result, so the duplicate only exists once the
+#              second pull request merges.
+#
+# Compile is not a job. The release-finalize commit runs
+# `changelog-fragments.py compile`, which folds the fragments into the
+# versioned heading and carries any notes already under `[Unreleased]`
+# into that same section. release.yml still reads that heading. An
+# `-rc.*` tag whose `[Unreleased]` is empty already falls back to
+# `## [X.Y.Z]`.
+#
+# Trust
+# -----
+# The script is fetched from Wilkes-Liberty/shared-ci at job.workflow_sha —
+# the commit this workflow file was resolved to — never from the caller's
+# tree. A pull request in a consuming repository can delete its own caller;
+# it cannot edit the script this run executes. A relative caller inside
+# shared-ci resolves that SHA to the commit under test, which is how a
+# change to the script gets tested. Callers pinned to `@v1` do not.
+#
+# Nothing from the event payload is interpolated into a `run:` body. Inputs
+# and the base SHA arrive through `env:`.
+
+on:
+  workflow_call:
+    inputs:
+      changelog-path:
+        description: Path to the caller's CHANGELOG.
+        type: string
+        default: CHANGELOG.md
+      fragments-dir:
+        description: Directory of one fragment file per pull request.
+        type: string
+        default: changelog.d
+      label:
+        description: >-
+          Label that opts a pull request into requiring one new fragment.
+          DEV-69: unlabelled pull requests pass this job.
+        type: string
+        default: changelog
+      extra-sections:
+        description: >-
+          Comma-separated ### headings allowed after the Keep a Changelog
+          six (Added, Changed, Deprecated, Removed, Fixed, Security).
+          Empty keeps that list and nothing else.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  fragment:
+    name: Changelog fragment
+    # Push has no pull request to label. The job must still exist on a pull
+    # request when the label is absent: a skipped required check blocks the
+    # pull request, so the label guard is on the steps, not the job.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether a fragment is required
+        env:
+          REQUIRED: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUIRED" = "true" ]; then
+            echo "This pull request carries the changelog label; one new fragment is required."
+          else
+            echo "No changelog label, or Dependabot; a fragment is not required."
+          fi
+
+      - name: Check out the pull request
+        if: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the trusted script
+        if: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_REPO: Wilkes-Liberty/shared-ci
+          SCRIPTS_REF: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SCRIPTS_REF}" ]; then
+            echo "::error::job.workflow_sha is empty; cannot locate the trusted script."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/trusted"
+          gh api "repos/${SOURCE_REPO}/contents/.github/scripts/changelog-fragments.py?ref=${SCRIPTS_REF}" \
+            -H "Accept: application/vnd.github.raw" \
+            > "$RUNNER_TEMP/trusted/changelog-fragments.py"
+          if ! [ -s "$RUNNER_TEMP/trusted/changelog-fragments.py" ]; then
+            echo "::error::could not fetch changelog-fragments.py from ${SOURCE_REPO}@${SCRIPTS_REF}."
+            exit 1
+          fi
+
+      - name: Require one fragment
+        if: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          CHANGELOG: ${{ inputs.changelog-path }}
+          FRAGMENTS: ${{ inputs.fragments-dir }}
+          EXTRA: ${{ inputs.extra-sections }}
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/trusted/changelog-fragments.py" check \
+            --changelog "$CHANGELOG" \
+            --fragments "$FRAGMENTS" \
+            --extra-sections "$EXTRA" \
+            --require-entry \
+            --base "$BASE"
+
+  structure:
+    name: Changelog structure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the trusted script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_REPO: Wilkes-Liberty/shared-ci
+          SCRIPTS_REF: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SCRIPTS_REF}" ]; then
+            echo "::error::job.workflow_sha is empty; cannot locate the trusted script."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/trusted"
+          gh api "repos/${SOURCE_REPO}/contents/.github/scripts/changelog-fragments.py?ref=${SCRIPTS_REF}" \
+            -H "Accept: application/vnd.github.raw" \
+            > "$RUNNER_TEMP/trusted/changelog-fragments.py"
+          if ! [ -s "$RUNNER_TEMP/trusted/changelog-fragments.py" ]; then
+            echo "::error::could not fetch changelog-fragments.py from ${SOURCE_REPO}@${SCRIPTS_REF}."
+            exit 1
+          fi
+
+      - name: Validate fragments and the changelog
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          CHANGELOG: ${{ inputs.changelog-path }}
+          FRAGMENTS: ${{ inputs.fragments-dir }}
+          EXTRA: ${{ inputs.extra-sections }}
+        run: |
+          set -euo pipefail
+          BASE="${PR_BASE:-${PUSH_BEFORE:-}}"
+          args=(
+            python3 "$RUNNER_TEMP/trusted/changelog-fragments.py" check
+            --changelog "$CHANGELOG"
+            --fragments "$FRAGMENTS"
+            --extra-sections "$EXTRA"
+          )
+          # `before` is all zeros on a branch's first push; nothing to diff.
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+            args+=(--base "$BASE")
+          fi
+          "${args[@]}"
