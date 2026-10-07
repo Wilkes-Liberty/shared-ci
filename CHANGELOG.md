@@ -4,6 +4,15 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+- **Test fixtures no longer inherit operator Git hooks.** Disposable
+  repositories in the attribution suites pass `-c core.hooksPath` at an
+  empty directory, which outranks a machine-level `commit-msg` hook and
+  any inherited `GIT_CONFIG_*`. A negative test that plants a trailer
+  keeps that trailer until the scanner runs. Operator hooks and this
+  repository's configuration are unchanged, and the scanner is not
+  bypassed. Not a change to the scripts that gate pull requests.
+  (shared-ci#19)
+
 ## [1.3.1] - 2026-09-09
 
 - **Strip Bugbot `CURSOR_SUMMARY` blocks from PR bodies before the

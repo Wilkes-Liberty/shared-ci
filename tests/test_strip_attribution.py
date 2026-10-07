@@ -10,6 +10,12 @@ they always commit as Cursor Agent <cursoragent@cursor.com> with the session
 initiator as a Co-authored-by trailer. Before this rewrite, strip preserved
 that author and vault#183 stayed red.
 
+Disposable repositories are hermetic (issue 19). Every git invocation passes
+`-c core.hooksPath` pointed at an empty directory. That outranks an operator's
+global hooks and any inherited `GIT_CONFIG_*`, so a commit-msg hook cannot
+strip a trailer the test planted before strip or the scanner sees it. The
+operator's hooks and this repository's configuration are not modified.
+
 Run: python3 -m unittest discover -s tests
 """
 
@@ -56,18 +62,27 @@ def load_script(name: str, path: Path):
 
 
 class Repo:
-    """A throwaway git repository with one base commit."""
+    """A throwaway git repository with one base commit.
+
+    Hermetic on purpose (issue 19): ``-c core.hooksPath`` points at an empty
+    directory and outranks inherited hooks. See the module docstring.
+    """
 
     def __init__(self):
-        self.dir = tempfile.mkdtemp(prefix="strip-attr-test-")
+        self.root = tempfile.mkdtemp(prefix="strip-attr-test-")
+        self.dir = str(Path(self.root) / "repo")
+        self.hooks = str(Path(self.root) / "hooks")
+        Path(self.dir).mkdir()
+        Path(self.hooks).mkdir()
         self._git("init", "-q", "-b", "master")
         self._git("config", "user.name", HUMAN[0])
         self._git("config", "user.email", HUMAN[1])
         self.base = self.commit("base", identity=HUMAN)
 
     def _git(self, *args, env=None):
+        # -c outranks repo config, global config, and GIT_CONFIG_*.
         return subprocess.run(
-            ["git", "-C", self.dir, *args],
+            ["git", "-c", f"core.hooksPath={self.hooks}", "-C", self.dir, *args],
             capture_output=True,
             text=True,
             check=True,
@@ -147,7 +162,7 @@ class Repo:
         )
 
     def cleanup(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 class PatternSyncTest(unittest.TestCase):
@@ -405,6 +420,9 @@ class TrailerAndDateTest(unittest.TestCase):
             + trailer("Cursor Agent <cursoragent@cursor.com>")
         )
         self.repo.commit(msg, identity=CURSOR)
+        # The planted trailer must still be on the commit. An inherited
+        # commit-msg hook would have removed it before strip ran (issue 19).
+        self.assertIn("Cursor Agent", self.repo.message())
         self.repo.strip()
         body = self.repo.message()
         self.assertIn(HUMAN_NOREPLY[0], body)

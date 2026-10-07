@@ -10,6 +10,13 @@ on 2026-08-01 a pull request merged carrying `copilot-swe-agent[bot]` in its
 author field, and this check passed it. Trailers had been stripped; nothing ever
 looked at who the commit claimed wrote it.
 
+Disposable repositories are hermetic (issue 19). Every git invocation passes
+`-c core.hooksPath` pointed at an empty directory. That outranks an operator's
+global hooks and any inherited `GIT_CONFIG_*`, so a commit-msg hook cannot
+strip a trailer the test planted before the scanner sees it. The operator's
+hooks and this repository's configuration are not modified. The scanner is
+not bypassed: a planted trailer must still fail the check.
+
 Run: python3 -m unittest discover -s tests
 """
 
@@ -38,18 +45,28 @@ def trailer(author: str) -> str:
 
 
 class Repo:
-    """A throwaway git repository with one base commit."""
+    """A throwaway git repository with one base commit.
+
+    Hermetic on purpose (issue 19): ``-c core.hooksPath`` points at an empty
+    directory and outranks inherited hooks. See the module docstring.
+    """
 
     def __init__(self):
-        self.dir = tempfile.mkdtemp(prefix="attr-test-")
+        self.root = tempfile.mkdtemp(prefix="attr-test-")
+        self.dir = str(Path(self.root) / "repo")
+        self.hooks = str(Path(self.root) / "hooks")
+        Path(self.dir).mkdir()
+        Path(self.hooks).mkdir()
         self._git("init", "-q", "-b", "master")
         self._git("config", "user.name", HUMAN[0])
         self._git("config", "user.email", HUMAN[1])
         self.base = self.commit("base", identity=HUMAN)
 
     def _git(self, *args, env=None):
-        return subprocess.run(["git", "-C", self.dir, *args],
-                              capture_output=True, text=True, check=True, env=env)
+        # -c outranks repo config, global config, and GIT_CONFIG_*.
+        return subprocess.run(
+            ["git", "-c", f"core.hooksPath={self.hooks}", "-C", self.dir, *args],
+            capture_output=True, text=True, check=True, env=env)
 
     def commit(self, message, identity=HUMAN, committer=None, filename="f.txt"):
         """Add a commit with an explicit author (and optionally committer).
@@ -82,7 +99,7 @@ class Repo:
 
     def cleanup(self):
         import shutil
-        shutil.rmtree(self.dir, ignore_errors=True)
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 class BaselineTest(unittest.TestCase):
@@ -510,6 +527,73 @@ class AnnotationEscapingTest(unittest.TestCase):
         self.assertNotIn("%0A::notice::", joined,
                          "a raw %0A survives and Actions would decode it to a newline")
         self.assertIn("50%25 done", joined, "an ordinary percent was not encoded")
+
+
+class InheritedHookTest(unittest.TestCase):
+    """A machine-level commit-msg hook must not rewrite the commit under test.
+
+    The operator's ``core.hooksPath`` strips attribution trailers at commit
+    time. ``test_trailer_in_message_still_fails`` then saw a clean commit and
+    reported CLEAN on a machine where hosted CI, which has no such hook,
+    reported DIRTY. The fixture isolates hooks for the test process only.
+    """
+
+    def test_inherited_commit_msg_hook_cannot_strip_a_planted_trailer(self):
+        import os
+        import shutil
+
+        hook_dir = tempfile.mkdtemp(prefix="attr-hostile-hooks-")
+        keys = ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")
+        saved = {key: os.environ.get(key) for key in keys}
+        hook = Path(hook_dir) / "commit-msg"
+        hook.write_text("#!/bin/sh\nprintf '%s\\n' stripped > \"$1\"\n")
+        hook.chmod(0o755)
+        hostile = os.environ.copy()
+        hostile["GIT_CONFIG_COUNT"] = "1"
+        hostile["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+        hostile["GIT_CONFIG_VALUE_0"] = hook_dir
+        raw = tempfile.mkdtemp(prefix="attr-raw-")
+        try:
+            # The hook is real: without the fixture's -c it replaces the message.
+            hostile.update({
+                "GIT_AUTHOR_NAME": HUMAN[0],
+                "GIT_AUTHOR_EMAIL": HUMAN[1],
+                "GIT_COMMITTER_NAME": HUMAN[0],
+                "GIT_COMMITTER_EMAIL": HUMAN[1],
+            })
+            subprocess.run(["git", "init", "-q", "-b", "master", raw],
+                           check=True, env=hostile)
+            (Path(raw) / "f.txt").write_text("x\n")
+            subprocess.run(["git", "-C", raw, "add", "f.txt"],
+                           check=True, env=hostile)
+            subprocess.run(
+                ["git", "-C", raw, "commit", "-q", "-m", "planted trailer"],
+                check=True, env=hostile)
+            bare = subprocess.run(
+                ["git", "-C", raw, "log", "-1", "--format=%B"],
+                check=True, capture_output=True, text=True, env=hostile)
+            self.assertEqual(bare.stdout.strip(), "stripped")
+
+            os.environ["GIT_CONFIG_COUNT"] = "1"
+            os.environ["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+            os.environ["GIT_CONFIG_VALUE_0"] = hook_dir
+            repo = Repo()
+            try:
+                repo.commit("a change\n\n" + trailer("Claude <noreply@anthropic.com>"))
+                message = repo._git("log", "-1", "--format=%B").stdout
+                self.assertIn("noreply@anthropic.com", message)
+                self.assertNotEqual(message.strip(), "stripped")
+                self.assertEqual(repo.check().returncode, DIRTY)
+            finally:
+                repo.cleanup()
+        finally:
+            shutil.rmtree(hook_dir, ignore_errors=True)
+            shutil.rmtree(raw, ignore_errors=True)
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 if __name__ == "__main__":
