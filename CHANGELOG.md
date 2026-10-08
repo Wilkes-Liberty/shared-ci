@@ -4,6 +4,8 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-08
+
 - **Test fixtures no longer inherit operator Git hooks.** Disposable
   repositories in the attribution suites pass `-c core.hooksPath` at an
   empty directory, which outranks a machine-level `commit-msg` hook and
@@ -12,6 +14,15 @@ All notable changes to shared-ci. One entry per merged PR.
   repository's configuration are unchanged, and the scanner is not
   bypassed. Not a change to the scripts that gate pull requests.
   (shared-ci#19)
+
+### Added
+- **Changelog entries are fragment files, so concurrent pull requests no
+  longer conflict on `CHANGELOG.md`.** A pull request labelled `changelog`
+  adds `changelog.d/<key>-<slug>.md` instead of a bullet under
+  `[Unreleased]`. `changelog-fragments.py compile` folds those fragments
+  into a `## [X.Y.Z] - YYYY-MM-DD` section at release finalize and deletes
+  them. The shared release workflow still reads that versioned heading.
+  (shared-ci#20)
 
 ## [1.3.1] - 2026-09-09
 
