@@ -27,9 +27,12 @@ keeps authorship credit that way on every pull request:
    default (operator lock 2026-08-22 / DEV-414). Same-repo PRs only;
    then force-with-lease pushes the cleaned tip. A merge of the base
    branch into the feature branch does not disable the rewrite — the
-   first-parent chain, including that merge, is replayed. Cursor cloud
-   wrappers and Bugbot `CURSOR_SUMMARY` blocks in the PR body are removed
-   when present.
+   first-parent chain, including that merge, is replayed. Removable AI
+   credit in the PR body (trailers, "Generated with" / robot-emoji lines,
+   the `cursor.com/agents` footer, Bugbot `CURSOR_SUMMARY` blocks) is
+   removed when present. `CURSOR_AGENT_PR_BODY_*` HTML comments stay so
+   a later Cursor agent description update can replace its section
+   instead of appending a second copy.
 2. **Fails** the check if any attribution credit remains: commit messages,
    commit author/committer identities, PR title, or PR body.
 
