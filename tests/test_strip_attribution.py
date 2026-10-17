@@ -153,12 +153,15 @@ class Repo:
             argv, cwd=self.dir, capture_output=True, text=True, env=env
         )
 
-    def check(self):
+    def check(self, title=None, body=None):
+        argv = [str(CHECK), "--base", self.base, "--head", "HEAD"]
+        for flag, text in (("--title-file", title), ("--body-file", body)):
+            if text is not None:
+                path = Path(self.dir) / (flag.strip("-") + ".txt")
+                path.write_text(text)
+                argv += [flag, str(path)]
         return subprocess.run(
-            [str(CHECK), "--base", self.base, "--head", "HEAD"],
-            cwd=self.dir,
-            capture_output=True,
-            text=True,
+            argv, cwd=self.dir, capture_output=True, text=True
         )
 
     def cleanup(self):
@@ -187,6 +190,8 @@ class PatternSyncTest(unittest.TestCase):
         self.assertEqual(check.IDENTITY_UNAMBIGUOUS, strip.IDENTITY_UNAMBIGUOUS)
         self.assertEqual(check.IDENTITY_AMBIGUOUS, strip.IDENTITY_AMBIGUOUS)
         self.assertEqual(check.IDENTITY_BOT_MARKER, strip.IDENTITY_BOT_MARKER)
+        self.assertEqual(check.CURSOR_PR_BODY_BEGIN, strip.CURSOR_PR_BODY_BEGIN)
+        self.assertEqual(check.CURSOR_PR_BODY_END, strip.CURSOR_PR_BODY_END)
 
     def test_identity_scan_agrees_on_cursor_agent_and_humans(self):
         check = load_script("check_attribution", CHECK)
@@ -482,10 +487,19 @@ class PrBodyCleanupTest(unittest.TestCase):
         self.assertIsNotNone(cleaned)
         self.assertIn("Rewrite Cursor Agent identity before the check.", cleaned)
         self.assertIn("Callers stay on @v1.", cleaned)
-        self.assertNotIn("CURSOR_AGENT_PR_BODY_BEGIN", cleaned)
-        self.assertNotIn("CURSOR_AGENT_PR_BODY_END", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_BEGIN -->", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_END -->", cleaned)
         self.assertNotIn("cursor.com/agents", cleaned)
         self.assertNotIn("<div>", cleaned)
+
+    def test_markers_only_are_not_rewritten(self):
+        """Section markers are not credit; rewriting them caused agency#28."""
+        body = (
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Human-written summary with no authorship claim.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        self.assertIsNone(self.strip.clean_cursor_pr_body(body))
 
     def test_no_markers_returns_none(self):
         body = (
@@ -542,6 +556,52 @@ class PrBodyCleanupTest(unittest.TestCase):
         self.assertIn("Human summary.", cleaned)
         self.assertNotIn("CURSOR_SUMMARY", cleaned)
         self.assertNotIn("AI-generated", cleaned)
+
+
+class CursorPrBodyMarkerRegressionTest(unittest.TestCase):
+    """DEV-1009 / agency#28: keep section markers, drop credit, still fail remaining credit.
+
+    A body with the markers plus a credit trailer comes out with the
+    markers kept, the credit removed, and the check passing. A body with
+    mid-prose credit outside the markers is not auto-rewritten and still
+    fails the check.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+        self.strip = load_script("strip_attribution_marker_regression", STRIP)
+        self.repo.commit("a normal change")
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_markers_plus_credit_keeps_markers_drops_credit_check_passes(self):
+        body = (
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Keep the section markers so the next update replaces in place.\n\n"
+            + trailer("Cursor Agent <cursoragent@cursor.com>") + "\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        cleaned = self.strip.clean_cursor_pr_body(body)
+        self.assertIsNotNone(cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_BEGIN -->", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_END -->", cleaned)
+        self.assertIn("Keep the section markers so the next update replaces in place.", cleaned)
+        self.assertNotIn("Cursor Agent", cleaned)
+        self.assertNotIn("cursoragent@", cleaned)
+        self.assertEqual(self.repo.check(body=cleaned).returncode, CLEAN)
+
+    def test_credit_outside_the_markers_still_fails(self):
+        body = (
+            "This change is AI-generated.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Human-written summary with no authorship claim.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        self.assertIsNone(self.strip.clean_cursor_pr_body(body))
+        result = self.repo.check(body=body)
+        self.assertEqual(result.returncode, DIRTY)
+        self.assertIn("AI-generated", result.stdout)
 
 
 class MergeCommitRewriteTest(unittest.TestCase):

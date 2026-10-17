@@ -257,6 +257,14 @@ def escape_workflow_command(text: str) -> str:
                 .replace("\n", "%0A"))
 
 
+# Structural Cursor PR-body section markers. Keep identical to
+# strip-attribution.py. These are not authorship credit; the stripper
+# leaves them in place (DEV-1009) and the body scan blanks them so the
+# comments themselves cannot trip AI_AUTHOR. Real credit in the rest of
+# the body is still scanned.
+CURSOR_PR_BODY_BEGIN = "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->"
+CURSOR_PR_BODY_END = "<!-- CURSOR_AGENT_PR_BODY_END -->"
+
 # ``` fenced block ``` or `inline span`
 CODE_SPAN = re.compile(r"```.*?```|``.*?``|`[^`\n]*`", re.S)
 
@@ -279,6 +287,17 @@ def strip_code(markdown: str) -> str:
     trailer inside backticks in a commit message is still a trailer.
     """
     return CODE_SPAN.sub(lambda m: " " * len(m.group(0)), markdown)
+
+
+def strip_pr_body_markers(text: str) -> str:
+    """Blank the exact Cursor PR-body section comments before scanning.
+
+    The comments name Cursor; they are structural, not credit. Blanking
+    them is cheaper than rewriting the body, and it is what keeps a
+    later agent update from appending a second copy (DEV-1009). Credit
+    outside the comments is still scanned.
+    """
+    return text.replace(CURSOR_PR_BODY_BEGIN, "").replace(CURSOR_PR_BODY_END, "")
 
 
 def commits_in_range(base: str, head: str):
@@ -437,7 +456,10 @@ def main() -> int:
             findings.append(f"the {label} could not be checked: {error}")
             continue
         if text:
-            description = find_attribution(strip_code(text))
+            scanned = strip_code(text)
+            if label == "PR body":
+                scanned = strip_pr_body_markers(scanned)
+            description = find_attribution(scanned)
             if description:
                 findings.append(f"the {label} carries {description}")
 

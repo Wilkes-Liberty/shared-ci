@@ -44,10 +44,14 @@ Scope:
     GIT_COMMITTER_DATE stays the original committer date. A human committer
     is left untouched (server-side "Commit suggestion" on someone else's
     work must not overwrite that human).
-  * ``clean_cursor_pr_body`` removes Cursor cloud wrapper markers and Bugbot
-    ``CURSOR_SUMMARY`` blocks from a PR body string. The workflow PATCHes
-    GitHub when those markers are present; this script does not talk to the
-    API.
+  * ``clean_cursor_pr_body`` removes removable AI credit from a PR body
+    string: attribution trailer lines, "Generated with <AI>" / robot-emoji
+    lines, a trailing ``cursor.com/agents`` footer, and Bugbot
+    ``CURSOR_SUMMARY`` blocks. Structural ``CURSOR_AGENT_PR_BODY_*`` HTML
+    comments are left in place so a later Cursor agent description update
+    can replace its section instead of appending a second copy (DEV-1009 /
+    agency#28). The workflow PATCHes GitHub when removable credit is
+    present; this script does not talk to the API.
   * Does **not** rewrite mid-subject prose like "AI-assisted refactor" —
     those still fail the check for a human reword (auto-rewriting subjects
     is too lossy).
@@ -205,6 +209,10 @@ DEFAULT_REWRITE_HUMAN = (
 # STRIP_AUTHOR_* is only consumed when it matches this shape.
 NOREPLY_EMAIL = re.compile(r"@users\.noreply\.github\.com\s*$", re.I)
 
+# Structural section markers Cursor uses to replace the agent-written body
+# in place. Keep identical to check-attribution.py. These are not credit
+# and must not be deleted — stripping them is what made agency#28 append
+# a second (then third) copy of the description (DEV-1009).
 CURSOR_PR_BODY_BEGIN = "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->"
 CURSOR_PR_BODY_END = "<!-- CURSOR_AGENT_PR_BODY_END -->"
 
@@ -344,27 +352,80 @@ def identity_changed(old: dict, new: dict) -> bool:
     )
 
 
-def clean_cursor_pr_body(body: str) -> Optional[str]:
-    """Return a cleaned PR body if Cursor chrome is present, else None.
+def should_strip_line(line: str) -> bool:
+    # Ignore pure whitespace; keep blank lines for structure until we collapse.
+    if not line.strip():
+        return False
+    return any(p.search(line) for p in STRIP_LINE_PATTERNS)
 
-    Removes the BEGIN/END HTML comments, a trailing
-    ``<div>…cursor.com/agents…</div>`` footer, and Bugbot
-    ``<!-- CURSOR_SUMMARY -->…<!-- /CURSOR_SUMMARY -->`` blocks. The
-    human-written summary outside those markers is preserved. Returns None
-    when none of those markers are present so callers can no-op without a
-    GitHub write.
+
+def strip_pr_body_credit_lines(body: str) -> Tuple[str, List[str]]:
+    """Remove attribution shapes that are safe to auto-drop from a PR body.
+
+    Same line patterns as commit-message stripping. The first line is not
+    special — a PR body has no subject to preserve. Structural
+    ``CURSOR_AGENT_PR_BODY_*`` comments are not credit and are kept.
+    Returns ``(body, [])`` when nothing matched, so a markers-only body
+    is never rewritten.
+    """
+    raw = body.replace("\r\n", "\n").replace("\r", "\n")
+    ended_with_newline = raw.endswith("\n")
+    if ended_with_newline:
+        raw = raw[:-1]
+    lines = raw.split("\n")
+    removed: List[str] = []
+    out: List[str] = []
+    for line in lines:
+        if line.strip() in (CURSOR_PR_BODY_BEGIN, CURSOR_PR_BODY_END):
+            out.append(line)
+            continue
+        if should_strip_line(line):
+            removed.append(line)
+            continue
+        out.append(line)
+    if not removed:
+        return body, []
+    while out and out[-1].strip() == "":
+        out.pop()
+    collapsed: List[str] = []
+    blank_run = False
+    for line in out:
+        if line.strip() == "":
+            if blank_run:
+                continue
+            blank_run = True
+            collapsed.append("")
+        else:
+            blank_run = False
+            collapsed.append(line)
+    cleaned = "\n".join(collapsed)
+    if cleaned or ended_with_newline:
+        cleaned += "\n"
+    return cleaned, removed
+
+
+def clean_cursor_pr_body(body: str) -> Optional[str]:
+    """Return a cleaned PR body if removable AI credit is present, else None.
+
+    Removes a trailing ``<div>…cursor.com/agents…</div>`` footer, Bugbot
+    ``<!-- CURSOR_SUMMARY -->…<!-- /CURSOR_SUMMARY -->`` blocks, and
+    attribution trailer / "Generated with" / robot-emoji lines. Structural
+    ``CURSOR_AGENT_PR_BODY_*`` HTML comments stay so a later agent update
+    can find its section (DEV-1009). The human-written summary is
+    preserved. Returns None when there is nothing removable so callers
+    can no-op without a GitHub write — including a body that only carries
+    the section markers.
     """
     if not body:
         return None
-    has_begin = CURSOR_PR_BODY_BEGIN in body
-    has_end = CURSOR_PR_BODY_END in body
     has_footer = CURSOR_PR_FOOTER.search(body) is not None
     has_summary = CURSOR_SUMMARY_BLOCK.search(body) is not None
-    if not (has_begin or has_end or has_footer or has_summary):
+    _, credit_removed = strip_pr_body_credit_lines(body)
+    if not (has_footer or has_summary or credit_removed):
         return None
-    cleaned = body.replace(CURSOR_PR_BODY_BEGIN, "").replace(CURSOR_PR_BODY_END, "")
-    cleaned = CURSOR_PR_FOOTER.sub("", cleaned)
+    cleaned = CURSOR_PR_FOOTER.sub("", body)
     cleaned = CURSOR_SUMMARY_BLOCK.sub("", cleaned)
+    cleaned, _ = strip_pr_body_credit_lines(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"^\s*\n", "", cleaned)
     cleaned = re.sub(r"\n[ \t]*\Z", "\n", cleaned)
@@ -384,13 +445,6 @@ def git(args: List[str], *, check: bool = True, text: bool = True) -> subprocess
 
 def short(rev: str) -> str:
     return rev[:12] if re.fullmatch(r"[0-9a-f]{40}", rev) else rev
-
-
-def should_strip_line(line: str) -> bool:
-    # Ignore pure whitespace; keep blank lines for structure until we collapse.
-    if not line.strip():
-        return False
-    return any(p.search(line) for p in STRIP_LINE_PATTERNS)
 
 
 def clean_message(message: str) -> Tuple[str, List[str]]:

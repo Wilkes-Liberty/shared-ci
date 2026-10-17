@@ -1,8 +1,11 @@
 name: Attribution
 
 # Strips AI-attribution trailers and AI author/committer identities from PR
-# commits, drops Cursor cloud wrappers from the PR body, then fails the check
-# if any attribution credit remains (commits, title, or body).
+# commits, strips removable AI credit from the PR body (trailers, Generated
+# with / robot-emoji lines, cursor.com/agents footer, Bugbot CURSOR_SUMMARY
+# blocks) while leaving CURSOR_AGENT_PR_BODY_* section markers in place,
+# then fails the check if any attribution credit remains (commits, title,
+# or body).
 #
 # Why this exists
 # ---------------
@@ -22,13 +25,18 @@ name: Attribution
 #    via STRIP_AUTHOR_* in @users.noreply.github.com shape, else
 #    Jeremy Michael Cerda <jmcerda@users.noreply.github.com>. Do not
 #    default to @wilkesliberty.com (operator lock 2026-08-22 / DEV-414).
-# 2. Cursor cloud PR-body wrappers (CURSOR_AGENT_PR_BODY_* comments, the
-#    trailing cursor.com/agents footer, and Bugbot CURSOR_SUMMARY blocks)
-#    are stripped via gh api PATCH when present. The human-written summary
-#    is preserved. Bugbot summaries can contain the same authorship-marker
-#    hits the body scanner flags (shared-ci#16).
+# 2. Removable PR-body credit is stripped via gh api PATCH when present:
+#    the trailing cursor.com/agents footer, Bugbot CURSOR_SUMMARY blocks,
+#    and attribution trailer / "Generated with" / robot-emoji lines.
+#    CURSOR_AGENT_PR_BODY_* HTML comments stay — they are structural.
+#    Removing them made the next Cursor agent description update append
+#    a second copy instead of replacing (DEV-1009 / agency#28). The
+#    human-written summary is preserved. Bugbot summaries can contain
+#    the same authorship-marker hits the body scanner flags (shared-ci#16).
 # 3. check-attribution.py fails the job if any attribution credit remains —
-#    including PR title/body and mid-subject prose the stripper will not touch.
+#    including PR title/body and mid-subject prose the stripper will not
+#    touch. The body scan ignores the exact CURSOR_AGENT_PR_BODY_* comments
+#    so those markers cannot trip the check.
 #
 # One file, three run modes
 # -------------------------
@@ -343,15 +351,18 @@ jobs:
           body="Removed AI attribution from **${COUNT}** commit(s) on this branch (standing order §1). Trees and author/committer dates are preserved. AI author/committer identities are rewritten to the human operator when a human Co-authored-by trailer or the PR opener is available. Re-run of this check will confirm the tip is clean."
           gh pr comment "$PR" --body "$body"
 
-      # Always before the scan (not only after a successful strip): Cursor
-      # cloud wrappers and Bugbot CURSOR_SUMMARY blocks are credit chrome
-      # the operator did not write. Bugbot summaries can also trip the
-      # body scanner (e.g. "AI-generated" in a review note — shared-ci#16).
-      # Required mode stays scan-only. Only PATCH when those markers are
-      # present; the human-written summary is left intact. The staged body
-      # file is updated so the scan below sees the cleaned text. A PATCH
-      # failure is a warning — a courtesy write must not decide the check.
-      - name: Remove Cursor cloud wrappers from the PR body
+      # Always before the scan (not only after a successful strip): removable
+      # PR-body credit chrome (cursor.com/agents footer, Bugbot
+      # CURSOR_SUMMARY, attribution trailer lines) is stripped via PATCH.
+      # CURSOR_AGENT_PR_BODY_* HTML comments stay so a later agent update
+      # can replace its section in place (DEV-1009 / agency#28). Bugbot
+      # summaries can trip the body scanner (e.g. "AI-generated" in a
+      # review note — shared-ci#16). Required mode stays scan-only. Only
+      # PATCH when removable credit is present; the human-written summary
+      # and the section markers are left intact. The staged body file is
+      # updated so the scan below sees the cleaned text. A PATCH failure
+      # is a warning — a courtesy write must not decide the check.
+      - name: Strip AI credit from the PR body
         if: steps.mode.outputs.mode != 'required'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -373,18 +384,18 @@ jobs:
           raw = src.read_text(encoding="utf-8")
           cleaned = mod.clean_cursor_pr_body(raw)
           if cleaned is None:
-              print("No Cursor cloud PR-body wrappers present")
+              print("No removable AI credit in the PR body")
               raise SystemExit(0)
 
           src.write_text(cleaned, encoding="utf-8")
           payload = pathlib.Path(os.environ["RUNNER_TEMP"]) / "pr-body-patch.json"
           payload.write_text(json.dumps({"body": cleaned}), encoding="utf-8")
-          print("Cleaned Cursor cloud PR-body wrappers locally")
+          print("Cleaned removable AI credit from the PR body locally")
           PY
           if [ -f "$RUNNER_TEMP/pr-body-patch.json" ]; then
             if ! gh api --method PATCH "repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
                   --input "$RUNNER_TEMP/pr-body-patch.json"; then
-              echo "::warning::could not PATCH the PR body to drop Cursor cloud wrappers"
+              echo "::warning::could not PATCH the PR body to drop removable AI credit"
             fi
           fi
 
