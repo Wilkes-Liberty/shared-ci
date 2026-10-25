@@ -69,6 +69,30 @@ on:
           DEV-69: unlabelled pull requests pass this job.
         type: string
         default: changelog
+      entry-policy:
+        description: opt-in requires the label; required uses the exemption label.
+        type: string
+        default: opt-in
+      exemption-label:
+        description: Explicit entry exemption for require-by-default repositories.
+        type: string
+        default: no-changelog
+      changelog-format:
+        description: versioned, calendar, or rolling; preserves the caller's archive convention.
+        type: string
+        default: versioned
+      allow-initial-release:
+        description: Permit a versioned changelog before its first release heading.
+        type: boolean
+        default: false
+      preserve-history:
+        description: Keep legacy release bodies unchanged while validating pending entries.
+        type: boolean
+        default: false
+      enforce-fragments:
+        description: Reject direct changelog edits even when an entry is optional.
+        type: boolean
+        default: false
       extra-sections:
         description: >-
           Comma-separated ### headings allowed after the Keep a Changelog
@@ -90,24 +114,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Decide whether a fragment is required
+        id: policy
         env:
-          REQUIRED: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+          POLICY: ${{ inputs.entry-policy }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) }}
+          EXEMPT: ${{ contains(github.event.pull_request.labels.*.name, inputs.exemption-label) }}
+          DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
         run: |
           set -euo pipefail
-          if [ "$REQUIRED" = "true" ]; then
-            echo "This pull request carries the changelog label; one new fragment is required."
-          else
-            echo "No changelog label, or Dependabot; a fragment is not required."
-          fi
+          case "$POLICY" in
+            opt-in) required="$LABELLED" ;;
+            required) if [ "$EXEMPT" = true ]; then required=false; else required=true; fi ;;
+            *) echo "::error::entry-policy must be opt-in or required"; exit 1 ;;
+          esac
+          if [ "$DEPENDABOT" = true ]; then required=false; fi
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+          echo "Entry policy: $POLICY; required: $required"
 
       - name: Check out the pull request
-        if: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        if: steps.policy.outputs.required == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Fetch the trusted script
-        if: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        if: steps.policy.outputs.required == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_REPO: Wilkes-Liberty/shared-ci
@@ -128,20 +159,25 @@ jobs:
           fi
 
       - name: Require one fragment
-        if: ${{ contains(github.event.pull_request.labels.*.name, inputs.label) && github.event.pull_request.user.login != 'dependabot[bot]' }}
+        if: steps.policy.outputs.required == 'true'
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           CHANGELOG: ${{ inputs.changelog-path }}
           FRAGMENTS: ${{ inputs.fragments-dir }}
           EXTRA: ${{ inputs.extra-sections }}
+          FORMAT: ${{ inputs.changelog-format }}
+          INITIAL: ${{ inputs.allow-initial-release }}
+          PRESERVE: ${{ inputs.preserve-history }}
         run: |
           set -euo pipefail
-          python3 "$RUNNER_TEMP/trusted/changelog-fragments.py" check \
-            --changelog "$CHANGELOG" \
-            --fragments "$FRAGMENTS" \
-            --extra-sections "$EXTRA" \
-            --require-entry \
-            --base "$BASE"
+          args=(python3 -I "$RUNNER_TEMP/trusted/changelog-fragments.py" check
+            --changelog "$CHANGELOG" --fragments "$FRAGMENTS"
+            --extra-sections "$EXTRA" --format "$FORMAT"
+            --require-entry --base "$BASE")
+          if [ "$INITIAL" = true ]; then args+=(--allow-initial-release); fi
+          if [ "$PRESERVE" = true ]; then args+=(--preserve-history); fi
+          "${args[@]}"
+
 
   structure:
     name: Changelog structure
@@ -175,21 +211,28 @@ jobs:
       - name: Validate fragments and the changelog
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
+          ENFORCE: ${{ inputs.enforce-fragments }}
           PUSH_BEFORE: ${{ github.event.before }}
           CHANGELOG: ${{ inputs.changelog-path }}
           FRAGMENTS: ${{ inputs.fragments-dir }}
           EXTRA: ${{ inputs.extra-sections }}
+          FORMAT: ${{ inputs.changelog-format }}
+          INITIAL: ${{ inputs.allow-initial-release }}
+          PRESERVE: ${{ inputs.preserve-history }}
         run: |
           set -euo pipefail
           BASE="${PR_BASE:-${PUSH_BEFORE:-}}"
           args=(
-            python3 "$RUNNER_TEMP/trusted/changelog-fragments.py" check
+            python3 -I "$RUNNER_TEMP/trusted/changelog-fragments.py" check
             --changelog "$CHANGELOG"
             --fragments "$FRAGMENTS"
-            --extra-sections "$EXTRA"
+            --extra-sections "$EXTRA" --format "$FORMAT"
           )
+          if [ "$INITIAL" = true ]; then args+=(--allow-initial-release); fi
+          if [ "$PRESERVE" = true ]; then args+=(--preserve-history); fi
           # `before` is all zeros on a branch's first push; nothing to diff.
           if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
             args+=(--base "$BASE")
+            if [ "$ENFORCE" = true ] && [ -n "$PR_BASE" ]; then args+=(--enforce-fragments); fi
           fi
           "${args[@]}"

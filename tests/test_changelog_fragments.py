@@ -316,7 +316,7 @@ class CompileTest(unittest.TestCase):
             "compile", "--version", "1.4.0", "--date", "2026-10-07",
         )
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("no fragments", result.stderr)
+        self.assertIn("no substantive pending notes", result.stderr)
 
 
 class MergeAndEntryTest(unittest.TestCase):
@@ -418,7 +418,7 @@ class MergeAndEntryTest(unittest.TestCase):
         self.box.commit_all("heading without consuming fragments")
         result = self.box.run("check", "--require-entry", "--base", base)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("deleted 0", result.stdout)
+        self.assertIn("consume every pending fragment", result.stdout)
         self.assertTrue((self.box.repo / "changelog.d" / "20-keep.md").is_file())
 
     def test_fragment_pr_that_also_edits_the_changelog_fails(self):
@@ -452,6 +452,153 @@ class MergeAndEntryTest(unittest.TestCase):
         self.assertIn("Alpha.", section)
         self.assertIn("Beta.", section)
         self.assertNotIn("baseline", section)
+
+
+class AdoptionSafetyTest(unittest.TestCase):
+    """Failure modes: lost notes, unsafe paths, policy bypass and new formats."""
+
+    def setUp(self):
+        self.box = Sandbox()
+
+    def tearDown(self):
+        self.box.cleanup()
+
+    def test_lossy_release_compile_is_rejected(self):
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("changelog.d/25-required.md", fragment("Fixed", "Never lose this entry."))
+        base = self.box.commit_all("base")
+        (self.box.repo / "changelog.d/25-required.md").unlink()
+        self.box.write("CHANGELOG.md", BASE.replace("## [Unreleased]", "## [Unreleased]\n\n## [1.4.0] - 2026-10-25\n\n- unrelated"))
+        self.box.commit_all("drop entry disguised as release")
+        result = self.box.run("check", "--require-entry", "--base", base)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("compile", result.stdout)
+
+    def test_unlabelled_shared_changelog_edit_is_rejected(self):
+        self.box.write("CHANGELOG.md", BASE)
+        base = self.box.commit_all("base")
+        self.box.write("CHANGELOG.md", BASE.replace("## [Unreleased]", "## [Unreleased]\n\n- shared edit"))
+        self.box.commit_all("shared edit")
+        result = self.box.run("check", "--enforce-fragments", "--base", base)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_unlabelled_change_without_entry_is_allowed(self):
+        self.box.write("CHANGELOG.md", BASE)
+        base = self.box.commit_all("base")
+        self.box.write("ordinary.txt", "change\n")
+        self.box.commit_all("ordinary")
+        result = self.box.run("check", "--enforce-fragments", "--base", base)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_symlink_fragment_and_directory_are_rejected(self):
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("outside/25-secret.md", fragment("Fixed", "outside content"))
+        directory = self.box.repo / "changelog.d"
+        directory.mkdir()
+        (directory / "25-link.md").symlink_to("../outside/25-secret.md")
+        result = self.box.run("check")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        (directory / "25-link.md").unlink()
+        directory.rmdir()
+        directory.symlink_to("outside", target_is_directory=True)
+        result = self.box.run("check")
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_calendar_and_rolling_compile_preserve_history(self):
+        for style, heading, history in (
+            ("calendar", "## [Unreleased]", "## [2026-10-24]\n\n- old calendar entry\n"),
+            ("rolling", "## Unreleased", ""),
+        ):
+            with self.subTest(style=style):
+                original = "# Changelog\n\n" + heading + "\n\n- existing note\n\n" + history
+                self.box.write("CHANGELOG.md", original)
+                self.box.write("changelog.d/25-note.md", fragment("Fixed", "new fragment"))
+                base = self.box.commit_all("format base")
+                result = self.box.run("compile", "--format", style, "--date", "2026-10-25")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                text = (self.box.repo / "CHANGELOG.md").read_text()
+                self.assertEqual(text.count("new fragment"), 1)
+                self.assertEqual(text.count("existing note"), 1)
+                self.assertIn("## [2026-10-25]", text)
+                self.assertTrue(text.endswith(history) if history else True)
+                self.box.commit_all("compile")
+                checked = self.box.run("check", "--format", style, "--enforce-fragments", "--base", base)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_preview_is_read_only_and_matches_compile(self):
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("changelog.d/25-preview.md", fragment("Added", "Candidate entry."))
+        preview = self.box.run("render", "--version", "1.4.0", "--date", "2026-10-25")
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual((self.box.repo / "CHANGELOG.md").read_text(), BASE)
+        self.assertTrue((self.box.repo / "changelog.d/25-preview.md").exists())
+        compiled = self.box.run("compile", "--version", "1.4.0", "--date", "2026-10-25")
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.assertEqual(preview.stdout, (self.box.repo / "CHANGELOG.md").read_text())
+
+    def test_preserved_legacy_sections_do_not_weaken_pending_validation(self):
+        legacy = BASE.replace("### Added", "### Historical category")
+        self.box.write("CHANGELOG.md", legacy)
+        self.box.write("changelog.d/25-history.md", fragment("Fixed", "new note"))
+        base = self.box.commit_all("legacy history")
+        self.assertEqual(self.box.run("check").returncode, 1)
+        compiled = self.box.run("compile", "--version", "1.4.0", "--date", "2026-10-25", "--preserve-history")
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.assertTrue((self.box.repo / "CHANGELOG.md").read_text().endswith(legacy.split("## [0.1.0]")[1]))
+        self.box.commit_all("compile preserves history")
+        checked = self.box.run("check", "--base", base, "--enforce-fragments", "--preserve-history")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        current = (self.box.repo / "CHANGELOG.md").read_text()
+        self.box.write("CHANGELOG.md", current.replace("## [Unreleased]", "## [Unreleased]\n\n### Unknown\n- invalid"))
+        self.assertEqual(self.box.run("check", "--preserve-history").returncode, 1)
+
+    def test_handwritten_only_release_compiles_and_empty_release_fails(self):
+        written = BASE.replace("## [Unreleased]", "## [Unreleased]\n\n### Fixed\n- inherited note")
+        self.box.write("CHANGELOG.md", written)
+        base = self.box.commit_all("handwritten backlog")
+        rendered = self.box.run("render", "--version", "1.4.0", "--date", "2026-10-25")
+        self.assertEqual(rendered.returncode, 0, rendered.stdout + rendered.stderr)
+        compiled = self.box.run("compile", "--version", "1.4.0", "--date", "2026-10-25")
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.box.commit_all("compile handwritten notes")
+        checked = self.box.run("check", "--base", base, "--enforce-fragments")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(self.box.run("compile", "--version", "1.4.1", "--date", "2026-10-26").returncode, 1)
+
+    def test_compile_does_not_follow_predictable_temporary_symlink(self):
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("changelog.d/25-safe.md", fragment("Fixed", "new note"))
+        self.box.write("unrelated.txt", "must survive")
+        (self.box.repo / "CHANGELOG.md.tmp").symlink_to("unrelated.txt")
+        compiled = self.box.run("compile", "--version", "1.4.0", "--date", "2026-10-25")
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.assertEqual((self.box.repo / "unrelated.txt").read_text(), "must survive")
+
+    def test_noncanonical_dates_are_rejected_without_mutation(self):
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("changelog.d/25-date.md", fragment("Fixed", "new note"))
+        for date in ("20261025", "2026-W43-7", "2026-02-30"):
+            with self.subTest(date=date):
+                result = self.box.run("compile", "--version", "1.4.0", "--date", date)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((self.box.repo / "CHANGELOG.md").read_text(), BASE)
+                self.assertTrue((self.box.repo / "changelog.d/25-date.md").exists())
+
+    def test_conflict_markers_fail_in_archives_and_fragments(self):
+        markers = "<<<<<<< HEAD\n- ours\n=======\n- theirs\n>>>>>>> branch\n"
+        self.box.write("CHANGELOG.md", BASE + markers)
+        self.assertEqual(self.box.run("check", "--preserve-history").returncode, 1)
+        self.box.write("CHANGELOG.md", BASE)
+        self.box.write("changelog.d/25-conflict.md", fragment("Fixed", markers))
+        self.assertEqual(self.box.run("check").returncode, 1)
+        self.assertEqual(self.box.run("compile", "--version", "1.4.0", "--date", "2026-10-25").returncode, 1)
+        self.assertEqual((self.box.repo / "CHANGELOG.md").read_text(), BASE)
+
+    def test_initial_release_requires_explicit_configuration(self):
+        self.box.write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n")
+        self.assertEqual(self.box.run("check").returncode, 1)
+        result = self.box.run("check", "--allow-initial-release")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

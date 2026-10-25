@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -52,7 +53,14 @@ SECTIONS = (
 )
 
 UNRELEASED = "## [Unreleased]"
-VERSION_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\]")
+CALENDAR_HEADING = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})\]$")
+SEMVER = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
+
+
+def unreleased_heading(style: str) -> str:
+    return "## Unreleased" if style == "rolling" else UNRELEASED
+
+VERSION_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]")
 DATED_VERSION_HEADING = re.compile(
     r"^## \[\d+\.\d+\.\d+\] - \d{4}-\d{2}-\d{2}$"
 )
@@ -60,6 +68,7 @@ LEGACY_HEADING = re.compile(r"^## v\d+\.\d+\.\d+")
 FRAGMENT_NAME = re.compile(
     r"^(?=.*-)[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]\.md$"
 )
+CONFLICT_MARKER = re.compile(r"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:[ \t].*)?$", re.M)
 H3 = re.compile(r"^### (.+?)\s*$", re.M)
 HEADING_LINE = re.compile(r"^#{2,3} ", re.M)
 EXTRA_NAME = re.compile(r"^[A-Z][A-Za-z0-9]*$")
@@ -139,8 +148,14 @@ def parse_fragment(path: Path, allowed: list[str]) -> tuple[str, str] | str:
         text = read_text(path)
     except UnicodeDecodeError:
         return f"{path.name} is not UTF-8"
+    return parse_fragment_text(text, path.name, allowed)
+
+
+def parse_fragment_text(text: str, name: str, allowed: list[str]) -> tuple[str, str] | str:
+    if CONFLICT_MARKER.search(text):
+        return f"{name} contains an unresolved conflict marker"
     if not text.startswith("---\n") and not text.startswith("---\r\n"):
-        return f"{path.name} must open with a '---' front matter block"
+        return f"{name} must open with a '---' front matter block"
     lines = text.splitlines()
     close_at = None
     for index in range(1, len(lines)):
@@ -148,7 +163,7 @@ def parse_fragment(path: Path, allowed: list[str]) -> tuple[str, str] | str:
             close_at = index
             break
     if close_at is None:
-        return f"{path.name} front matter is not closed with '---'"
+        return f"{name} front matter is not closed with '---'"
     raw = "\n".join(lines[1:close_at])
     body = "\n".join(lines[close_at + 1 :])
     fields: dict[str, str] = {}
@@ -156,19 +171,19 @@ def parse_fragment(path: Path, allowed: list[str]) -> tuple[str, str] | str:
         if not line.strip():
             continue
         if ":" not in line:
-            return f"{path.name} front matter line {line!r} is not 'key: value'"
+            return f"{name} front matter line {line!r} is not 'key: value'"
         key, value = line.split(":", 1)
         key = key.strip()
         value = value.strip()
         if not key:
-            return f"{path.name} has an empty front matter key"
+            return f"{name} has an empty front matter key"
         if key in fields:
-            return f"{path.name} repeats front matter key {key}"
+            return f"{name} repeats front matter key {key}"
         fields[key] = value
     unknown = sorted(set(fields) - {"section"})
     if unknown:
         return (
-            f"{path.name} front matter has unknown "
+            f"{name} front matter has unknown "
             f"key{'s' if len(unknown) != 1 else ''} {', '.join(unknown)}; "
             "only 'section' is read"
         )
@@ -176,13 +191,13 @@ def parse_fragment(path: Path, allowed: list[str]) -> tuple[str, str] | str:
     if section not in allowed:
         listed = ", ".join(allowed)
         return (
-            f"{path.name} section {section!r} is not one of: {listed}"
+            f"{name} section {section!r} is not one of: {listed}"
         )
     if not body.strip():
-        return f"{path.name} has an empty body"
+        return f"{name} has an empty body"
     if HEADING_LINE.search(body):
         return (
-            f"{path.name} body contains a markdown heading; "
+            f"{name} body contains a markdown heading; "
             "the compile step writes the headings"
         )
     return section, body.strip("\n")
@@ -218,14 +233,19 @@ def load_fragments(
     """Return ``(filename, section, body)`` sorted by filename, plus errors."""
     errors: list[str] = []
     found: list[tuple[str, str, str]] = []
+    if directory.is_symlink():
+        return found, [f"{directory} must not be a symlink"]
     if not directory.exists():
         return found, errors
     if not directory.is_dir():
         return found, [f"{directory} is not a directory"]
     for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        if path.is_symlink():
+            errors.append(f"{path.name} must not be a symlink")
+            continue
         if path.name.startswith("."):
             continue
-        if path.is_dir():
+        if not path.is_file():
             errors.append(
                 f"{directory.name}/{path.name} is a directory; "
                 "fragments are files, one per pull request"
@@ -250,7 +270,7 @@ def release_heading_lines(text: str) -> list[str]:
         stripped = line.rstrip()
         if stripped == UNRELEASED:
             continue
-        if VERSION_HEADING.match(stripped) or LEGACY_HEADING.match(stripped):
+        if VERSION_HEADING.match(stripped) or LEGACY_HEADING.match(stripped) or CALENDAR_HEADING.match(stripped):
             lines.append(stripped)
     return lines
 
@@ -304,14 +324,18 @@ def heading_order_errors(title: str, body: str, allowed: list[str]) -> list[str]
     return errors
 
 
-def structure_errors(text: str, allowed: list[str]) -> list[str]:
+def structure_errors(text: str, allowed: list[str], style: str = "versioned",
+                     allow_initial: bool = False, preserve_history: bool = False) -> list[str]:
+    pending = unreleased_heading(style)
     errors: list[str] = []
+    if CONFLICT_MARKER.search(text):
+        errors.append("changelog contains an unresolved conflict marker")
     unreleased = [
-        line for line in text.splitlines() if line.rstrip() == UNRELEASED
+        line for line in text.splitlines() if line.rstrip() == pending
     ]
     if len(unreleased) != 1:
         errors.append(
-            f"expected exactly one '{UNRELEASED}' heading, found {len(unreleased)}"
+            f"expected exactly one '{pending}' heading, found {len(unreleased)}"
         )
         return errors
 
@@ -319,15 +343,15 @@ def structure_errors(text: str, allowed: list[str]) -> list[str]:
     seen_unreleased = False
     followed = False
     for title, body in sections:
-        if title == UNRELEASED:
+        if title == pending:
             seen_unreleased = True
             errors.extend(heading_order_errors(title, body, allowed))
             continue
         if seen_unreleased and not followed and VERSION_HEADING.match(title):
             followed = True
-        if title.startswith("## "):
+        if style == "versioned" and not preserve_history and title.startswith("## "):
             errors.extend(heading_order_errors(title, body, allowed))
-    if not followed:
+    if not followed and style == "versioned" and not allow_initial:
         errors.append(
             "no '## [x.y.z]' release heading follows [Unreleased] — "
             "a release heading was probably deleted"
@@ -408,6 +432,11 @@ def entry_errors(
     head: str,
     changelog: str,
     fragments: str,
+    allowed: list[str] | None = None,
+    style: str = "versioned",
+    required: bool = True,
+    allow_initial: bool = False,
+    preserve_history: bool = False,
 ) -> list[str]:
     diff = git(
         ["diff", "--name-status", "--find-renames", "-z", f"{base}...{head}"],
@@ -443,22 +472,54 @@ def entry_errors(
     fragment_only = (
         len(added) == 1 and not deleted and not other and not changelog_changed
     )
-    if fragment_only:
+    if fragment_only or (not required and not added and not deleted and not other and not changelog_changed):
         return []
 
-    release = False
-    if changelog_changed and deleted and not added and not other:
-        shown = git(["diff", "-U0", f"{base}...{head}", "--", changelog], cwd)
-        if shown.returncode != 0:
-            return ["could not read the CHANGELOG diff for the release compile"]
-        for line in shown.stdout.splitlines():
-            if not line.startswith("+") or line.startswith("+++"):
-                continue
-            if DATED_VERSION_HEADING.match(line[1:]):
-                release = True
-                break
-    if release:
-        return []
+    if changelog_changed and not added and not other:
+        # Reproduce compilation from the merge base. A heading and deleted
+        # files alone do not prove their contents survived in the release.
+        merged = git(["merge-base", base, head], cwd)
+        if merged.returncode:
+            return ["could not find the merge base for compile verification"]
+        revision = merged.stdout.strip()
+        previous = show_file(cwd, revision, changelog)
+        current = show_file(cwd, head, changelog)
+        if previous is None or current is None:
+            return ["could not read changelog snapshots for compile verification"]
+        names = git(["ls-tree", "-r", "--name-only", revision, "--", fragments], cwd)
+        expected_paths = [name for name in names.stdout.splitlines()
+                          if is_fragment_path(name, fragments)]
+        if names.returncode or set(expected_paths) != set(deleted):
+            return ["release compile must consume every pending fragment"]
+        entries = []
+        for path in sorted(expected_paths):
+            raw = show_file(cwd, revision, path)
+            if raw is None:
+                return ["could not read a consumed fragment"]
+            parsed = parse_fragment_text(raw, Path(path).name, allowed or list(SECTIONS))
+            if isinstance(parsed, str):
+                return [parsed]
+            entries.append((Path(path).name, *parsed))
+        old_headings = {title for title, _ in h2_sections(previous)}
+        new_headings = [title for title, _ in h2_sections(current)
+                        if title not in old_headings]
+        if len(new_headings) != 1:
+            return ["release compile must add exactly one archive heading"]
+        title = new_headings[0]
+        match = (re.fullmatch(r"## \[(.+)\] - (\d{4}-\d{2}-\d{2})", title)
+                 if style == "versioned" else CALENDAR_HEADING.fullmatch(title))
+        if match is None:
+            return ["release compile has an invalid archive heading"]
+        version = match[1] if style == "versioned" else None
+        date = match[2] if style == "versioned" else match[1]
+        try:
+            expected = compile_text(previous, entries, allowed or list(SECTIONS),
+                                    style, version, date, allow_initial, preserve_history)
+        except ValueError as exc:
+            return [f"release compile: {exc}"]
+        if current == expected:
+            return []
+        return ["release compile differs from the lossless compiler output; notes or history changed"]
 
     detail = (
         f"added {len(added)} fragment(s), deleted {len(deleted)}, "
@@ -466,11 +527,11 @@ def entry_errors(
         f"CHANGELOG.md {'changed' if changelog_changed else 'unchanged'}"
     )
     return [
-        "a changelog-labelled pull request must add exactly one "
+        "a pull request requiring an entry must add exactly one "
         "changelog.d/<key>-<slug>.md fragment and leave CHANGELOG.md "
         "untouched, or be the release compile (CHANGELOG.md gains a "
         "'## [X.Y.Z] - YYYY-MM-DD' heading and the consumed fragments "
-        f"are deleted). This diff did neither ({detail})"
+        f"are deleted). Optional entries must follow the same storage rules ({detail})"
     ]
 
 
@@ -535,7 +596,8 @@ def render_release(preamble: str, existing: dict[str, str],
     return "\n\n".join(chunks).rstrip() + "\n"
 
 
-def splice_version(text: str, version: str, date: str, body: str) -> str:
+def splice_version(text: str, version: str | None, date: str, body: str,
+                   style: str = "versioned") -> str:
     """Insert the version section after ``[Unreleased]`` and empty that section.
 
     The bytes from the following release heading to the end of the file are
@@ -543,34 +605,77 @@ def splice_version(text: str, version: str, date: str, body: str) -> str:
     or repeated — the structural check reports that case first, and compile
     refuses to guess which block to replace.
     """
+    pending = unreleased_heading(style)
+    archive = f"## [{version}] - {date}" if style == "versioned" else f"## [{date}]"
     lines = text.splitlines(keepends=True)
     start = None
     end = None
     for index, line in enumerate(lines):
-        if line.rstrip("\r\n") == UNRELEASED:
+        if line.rstrip("\r\n") == pending:
             if start is not None:
-                raise ValueError(f"more than one '{UNRELEASED}' heading")
+                raise ValueError(f"more than one '{pending}' heading")
             start = index
         elif start is not None and end is None and line.startswith("## "):
             end = index
             break
     if start is None:
-        raise ValueError(f"no '{UNRELEASED}' heading to compile into")
+        raise ValueError(f"no '{pending}' heading to compile into")
     tail = "".join(lines[end:]) if end is not None else ""
     if not body.endswith("\n"):
         body += "\n"
     # A blank line between the new section and the previous release heading.
     spacer = "\n" if tail else ""
     insertion = (
-        f"{UNRELEASED}\n"
+        f"{pending}\n"
         f"\n"
-        f"## [{version}] - {date}\n"
+        f"{archive}\n"
         f"\n"
         f"{body}"
         f"{spacer}"
     )
     prefix = "".join(lines[:start])
     return prefix + insertion + tail
+
+
+def compile_text(
+    text: str,
+    found: list[tuple[str, str, str]],
+    allowed: list[str],
+    style: str,
+    version: str | None,
+    date: str,
+    allow_initial: bool = False,
+    preserve_history: bool = False,
+) -> str:
+    if style == "versioned" and (version is None or not SEMVER.fullmatch(version)):
+        raise ValueError("--version must be MAJOR.MINOR.PATCH[-suffix]")
+    if style != "versioned" and version is not None:
+        raise ValueError("--version is only valid for versioned changelogs")
+    try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            raise ValueError("date shape")
+        dt.date.fromisoformat(date)
+    except ValueError as exc:
+        raise ValueError("--date must be YYYY-MM-DD") from exc
+    archive = f"## [{version}]" if style == "versioned" else f"## [{date}]"
+    if any(line == archive or line.startswith(archive + " ")
+           for line in text.splitlines()):
+        raise ValueError(f"changelog already has a '{archive}' heading")
+    errors = structure_errors(text, allowed, style, allow_initial, preserve_history)
+    if errors:
+        raise ValueError("; ".join(errors))
+    body = next(body for title, body in h2_sections(text)
+                if title == unreleased_heading(style))
+    partitioned = partition_unreleased(body, allowed)
+    if isinstance(partitioned, str):
+        raise ValueError(partitioned)
+    preamble, existing = partitioned
+    rendered = render_release(preamble, existing, found, allowed)
+    substantive = re.sub(r"<!--[\s\S]*?-->", "", rendered)
+    if not any(line.strip() and not re.match(r"^\s*(?:#{1,6}(?:\s|$)|\[[^]]+\]:)", line)
+               for line in substantive.splitlines()):
+        raise ValueError("no substantive pending notes to compile")
+    return splice_version(text, version, date, rendered, style)
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -582,7 +687,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     changelog = Path(args.changelog)
     fragments = Path(args.fragments)
-    if not changelog.is_file():
+    if changelog.is_symlink() or not changelog.is_file():
         print(f"::error::cannot read {changelog}")
         return 1
     try:
@@ -591,7 +696,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"::error::{escape(str(changelog))} is not UTF-8")
         return 1
 
-    errors = structure_errors(text, allowed)
+    errors = structure_errors(text, allowed, args.format, args.allow_initial_release, args.preserve_history)
     _found, fragment_errors = load_fragments(fragments, allowed)
     errors.extend(fragment_errors)
 
@@ -605,12 +710,13 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
         else:
             errors.extend(deleted_heading_errors(previous, text, args.base))
-        if args.require_entry:
+        if args.require_entry or args.enforce_fragments:
             head = args.head or "HEAD"
             errors.extend(
-                entry_errors(cwd, args.base, head, args.changelog, args.fragments)
+                entry_errors(cwd, args.base, head, args.changelog, args.fragments,
+                             allowed, args.format, args.require_entry, args.allow_initial_release, args.preserve_history)
             )
-    elif args.require_entry:
+    elif args.require_entry or args.enforce_fragments:
         print("error: --require-entry needs --base", file=sys.stderr)
         return 2
 
@@ -623,10 +729,12 @@ def cmd_compile(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
-        print("error: --version must be MAJOR.MINOR.PATCH", file=sys.stderr)
+    if args.format == "versioned" and (args.version is None or not SEMVER.fullmatch(args.version)):
+        print("error: --version must be MAJOR.MINOR.PATCH[-suffix]", file=sys.stderr)
         return 2
     try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.date):
+            raise ValueError("date shape")
         dt.date.fromisoformat(args.date)
     except ValueError:
         print("error: --date must be YYYY-MM-DD", file=sys.stderr)
@@ -634,7 +742,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
     changelog = Path(args.changelog)
     fragments = Path(args.fragments)
-    if not changelog.is_file():
+    if changelog.is_symlink() or not changelog.is_file():
         print(f"error: cannot read {changelog}", file=sys.stderr)
         return 2
     try:
@@ -643,16 +751,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
         print(f"error: {changelog} is not UTF-8", file=sys.stderr)
         return 1
 
-    if any(
-        line.rstrip() == f"## [{args.version}]"
-        or line.startswith(f"## [{args.version}] ")
-        or line.startswith(f"## [{args.version}] -")
-        for line in text.splitlines()
-    ):
-        print(
-            f"error: {changelog} already has a '## [{args.version}]' heading",
-            file=sys.stderr,
-        )
+    archive = f"## [{args.version}]" if args.format == "versioned" else f"## [{args.date}]"
+    if any(line == archive or line.startswith(archive + " ") for line in text.splitlines()):
+        print(f"error: changelog already has a '{archive}' heading", file=sys.stderr)
         return 1
 
     found, errors = load_fragments(fragments, allowed)
@@ -660,44 +761,36 @@ def cmd_compile(args: argparse.Namespace) -> int:
         for error in errors:
             print(f"::error::{escape(error)}")
         return 1
-    if not found:
-        print(
-            f"error: no fragments in {fragments} to compile",
-            file=sys.stderr,
-        )
-        return 1
-
-    errors = structure_errors(text, allowed)
-    if errors:
-        for error in errors:
-            print(f"::error::{escape(error)}")
-        return 1
-
-    sections = h2_sections(text)
-    unreleased_body = ""
-    for title, body in sections:
-        if title == UNRELEASED:
-            unreleased_body = body
-            break
-    partitioned = partition_unreleased(unreleased_body, allowed)
-    if isinstance(partitioned, str):
-        print(f"::error::{escape(partitioned)}")
-        return 1
-    preamble, existing = partitioned
-    rendered = render_release(preamble, existing, found, allowed)
     try:
-        spliced = splice_version(text, args.version, args.date, rendered)
+        spliced = compile_text(text, found, allowed, args.format, args.version,
+                               args.date, args.allow_initial_release, args.preserve_history)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    temporary = changelog.with_name(changelog.name + ".tmp")
-    temporary.write_text(spliced, encoding="utf-8")
-    os.replace(temporary, changelog)
+    if args.command == "render":
+        print(spliced, end="")
+        return 0
+
+    # Exclusive creation prevents a pre-existing temporary symlink from being
+    # followed. Keep the temporary beside the destination for atomic replace.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=changelog.parent,
+            prefix=f".{changelog.name}.", delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(spliced)
+        os.chmod(temporary, changelog.stat().st_mode & 0o777)
+        os.replace(temporary, changelog)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     for name, _section, _body in found:
         (fragments / name).unlink()
     print(
-        f"Compiled {len(found)} fragment(s) into ## [{args.version}] - {args.date}."
+        f"Compiled {len(found)} fragment(s) into {args.version or args.date}."
     )
     return 0
 
@@ -724,18 +817,28 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="comma-separated ### headings allowed after the Keep a Changelog six",
     )
+    check.add_argument("--enforce-fragments", action="store_true",
+                       help="reject shared changelog edits even when no entry is required")
+    check.add_argument("--format", choices=("versioned", "calendar", "rolling"), default="versioned")
+    check.add_argument("--allow-initial-release", action="store_true")
+    check.add_argument("--preserve-history", action="store_true",
+                       help="validate pending sections without reformatting existing archives")
     check.set_defaults(func=cmd_check)
 
-    compile_cmd = sub.add_parser(
-        "compile",
-        help="fold fragments into a versioned CHANGELOG section and delete them",
-    )
-    compile_cmd.add_argument("--changelog", default="CHANGELOG.md")
-    compile_cmd.add_argument("--fragments", default="changelog.d")
-    compile_cmd.add_argument("--version", required=True)
-    compile_cmd.add_argument("--date", required=True)
-    compile_cmd.add_argument("--extra-sections", default="")
-    compile_cmd.set_defaults(func=cmd_compile)
+    for command in ("compile", "render"):
+        compile_cmd = sub.add_parser(
+            command,
+            help="compile fragments into an archive; render previews without writes",
+        )
+        compile_cmd.add_argument("--changelog", default="CHANGELOG.md")
+        compile_cmd.add_argument("--fragments", default="changelog.d")
+        compile_cmd.add_argument("--version")
+        compile_cmd.add_argument("--format", choices=("versioned", "calendar", "rolling"), default="versioned")
+        compile_cmd.add_argument("--allow-initial-release", action="store_true")
+        compile_cmd.add_argument("--preserve-history", action="store_true")
+        compile_cmd.add_argument("--date", required=True)
+        compile_cmd.add_argument("--extra-sections", default="")
+        compile_cmd.set_defaults(func=cmd_compile)
     return parser
 
 
