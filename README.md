@@ -123,6 +123,7 @@ on:
     branches: [master]
 permissions:
   contents: read
+  pull-requests: read
 jobs:
   changelog:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/changelog-fragments.yml@v1
@@ -171,7 +172,9 @@ Use the same `--format`, `--extra-sections`, `--allow-initial-release`, and `--p
 
 Fragment filenames must be unique across concurrent PRs, for example `1234-cache-expiry.md`; use distinct slugs when one issue has several PRs. Do not reuse an existing fragment filename. This removes ordinary changelog append collisions; changes to the same source file or competing release compilations can still conflict.
 
-The reusable workflow uses read-only repository permissions and fetches its checker from the exact commit of the called workflow. Python runs in isolated mode. Consumers keep configuration and stable status aliases; parsing and compilation remain centralized.
+For callers with automatic labeling, run the reusable workflow after that job and propagate labeling failures. The shared gate reads current labels: a label written with `GITHUB_TOKEN` does not create a new `labeled` workflow run. On push or deliberately skipped labeling, allow the shared structure job to run with an explicit dependency condition.
+
+The reusable workflow uses read-only repository and pull-request permissions and fetches its checker from the exact commit of the called workflow. Python runs in isolated mode. Consumers keep configuration and stable status aliases; parsing and compilation remain centralized.
 
 ## Versioning
 
