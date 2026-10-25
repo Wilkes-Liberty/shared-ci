@@ -26,3 +26,5 @@ permissions:
 jobs:
   changelog:
     uses: ./.github/workflows/changelog-fragments.yml
+    with:
+      enforce-fragments: true
