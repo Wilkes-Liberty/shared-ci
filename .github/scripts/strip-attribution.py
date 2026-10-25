@@ -9,7 +9,7 @@ when it can, so the operator does not have to hand-rebase every Copilot
 trailer or Cursor Agent author stamp before merge.
 
 Scope:
-  * Rewrites **commit messages** in base..head (non-merge commits) to remove
+  * Rewrites **commit messages** in base..head on the first-parent chain to remove
     attribution *shapes* — credit trailers naming an AI author, "Generated
     with <AI>" footers, and the robot-emoji marker line.
   * Rewrites **author and/or committer identity** when that slot would fail
@@ -76,6 +76,7 @@ GitHub Actions: writes `stripped` and `count` to $GITHUB_OUTPUT when set.
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import os
 import re
 import subprocess
@@ -219,21 +220,74 @@ CURSOR_PR_BODY_END = "<!-- CURSOR_AGENT_PR_BODY_END -->"
 # Trailing footer Cursor appends after the end marker. Only a <div> at the
 # end of the body that mentions cursor.com/agents is removed, so a mention
 # of that URL in the human-written summary is left alone.
-CURSOR_PR_FOOTER = re.compile(
-    r"(?:\r?\n)*<div\b[^>]*>[\s\S]*?cursor\.com/agents[\s\S]*?</div>[ \t]*(?:\r?\n)*\Z",
-    re.I,
-)
+class FooterDivs(HTMLParser):
+    """Locate complete top-level divs without consuming sibling prose."""
+
+    def __init__(self, body):
+        super().__init__(convert_charrefs=False)
+        self.offsets = [0]
+        for line in body.splitlines(keepends=True):
+            self.offsets.append(self.offsets[-1] + len(line))
+        self.stack = []
+        self.spans = []
+        self.feed(body)
+
+    def absolute_offset(self):
+        line, column = self.getpos()
+        return self.offsets[line - 1] + column
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "div":
+            self.stack.append(self.absolute_offset())
+
+    def handle_endtag(self, tag):
+        if tag == "div" and self.stack:
+            start = self.stack.pop()
+            if not self.stack:
+                self.spans.append((start, self.absolute_offset() + len("</div>")))
+
+
+def code_ranges(body):
+    """Protect Markdown code examples from automatic prose cleanup."""
+    ranges = []
+    fence = None
+    start = offset = 0
+    for line in body.splitlines(keepends=True):
+        match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})", line)
+        if match:
+            marker = match.group(1)
+            if fence is None:
+                fence, start = marker, offset
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                ranges.append((start, offset + len(line)))
+                fence = None
+        offset += len(line)
+    if fence is not None:
+        ranges.append((start, len(body)))
+    ranges.extend((m.start(), m.end()) for m in
+                  re.finditer(r"(`+)(.+?)\1", body, re.S))
+    return ranges
+
+
+def footer_span(body):
+    protected = code_ranges(body)
+    for start, end in reversed(FooterDivs(body).spans):
+        if any(a <= start < b for a, b in protected):
+            continue
+        if not body[end:].strip() and "cursor.com/agents" in body[start:end].lower():
+            return start, len(body)
+    return None
 
 # Bugbot appends this block in place on `edited` / `synchronize`. Its prose
 # can contain the same authorship-marker hits the body scanner flags, even
 # when the human-written body does not (shared-ci#16 / webcms#828). Strip
 # the whole block.
-# Greedy on purpose: Bugbot's own overview often quotes the marker pair
-# inside the block; a non-greedy match would stop at that inner end and
-# leave an orphaned tail that still trips the scanner.
+# Standalone marker lines delimit a block; quoted marker examples inside it
+# are prose. Match each block independently so intervening human text stays.
 CURSOR_SUMMARY_BLOCK = re.compile(
-    r"<!--\s*CURSOR_SUMMARY\s*-->[\s\S]*<!--\s*/CURSOR_SUMMARY\s*-->",
-    re.I,
+    r"^[ \t]*<!--[ \t]*CURSOR_SUMMARY[ \t]*-->[ \t]*$"
+    r"[\s\S]*?^[ \t]*<!--[ \t]*/CURSOR_SUMMARY[ \t]*-->[ \t]*$",
+    re.I | re.M,
 )
 
 
@@ -375,7 +429,14 @@ def strip_pr_body_credit_lines(body: str) -> Tuple[str, List[str]]:
     lines = raw.split("\n")
     removed: List[str] = []
     out: List[str] = []
+    protected = code_ranges(raw)
+    offset = 0
     for line in lines:
+        in_code = any(a < offset + len(line) and offset < b for a, b in protected)
+        offset += len(line) + 1
+        if in_code:
+            out.append(line)
+            continue
         if line.strip() in (CURSOR_PR_BODY_BEGIN, CURSOR_PR_BODY_END):
             out.append(line)
             continue
@@ -418,17 +479,25 @@ def clean_cursor_pr_body(body: str) -> Optional[str]:
     """
     if not body:
         return None
-    has_footer = CURSOR_PR_FOOTER.search(body) is not None
-    has_summary = CURSOR_SUMMARY_BLOCK.search(body) is not None
+    footer = footer_span(body)
+    has_footer = footer is not None
+    protected = code_ranges(body)
+    summaries = [m for m in CURSOR_SUMMARY_BLOCK.finditer(body)
+                 if not any(a <= m.start() < b for a, b in protected)]
+    has_summary = bool(summaries)
     _, credit_removed = strip_pr_body_credit_lines(body)
     if not (has_footer or has_summary or credit_removed):
         return None
-    cleaned = CURSOR_PR_FOOTER.sub("", body)
-    cleaned = CURSOR_SUMMARY_BLOCK.sub("", cleaned)
+    spans = [(m.start(), m.end()) for m in summaries]
+    if footer:
+        spans.append(footer)
+    cleaned = body
+    for start, end in sorted(spans, reverse=True):
+        cleaned = cleaned[:start] + cleaned[end:]
     cleaned, _ = strip_pr_body_credit_lines(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"^\s*\n", "", cleaned)
-    cleaned = re.sub(r"\n[ \t]*\Z", "\n", cleaned)
+    cleaned = re.sub(r"(?:\n[ \t]*)+\Z", "\n", cleaned)
     if cleaned and not cleaned.endswith("\n"):
         cleaned += "\n"
     return cleaned
@@ -543,8 +612,8 @@ def commits_oldest_first(base: str, head: str) -> List[Tuple[str, str]]:
 
 
 def commit_meta(sha: str) -> dict:
-    """Author/committer identity and dates for a commit (raw %aN etc.)."""
-    fmt = "%aN%x1f%aE%x1f%aD%x1f%cN%x1f%cE%x1f%cD%x1f%T"
+    """Raw author/committer identity and dates, independent of mailmap."""
+    fmt = "%an%x1f%ae%x1f%aD%x1f%cn%x1f%ce%x1f%cD%x1f%T"
     line = git(["log", "-1", f"--format={fmt}", sha]).stdout.rstrip("\n")
     parts = line.split("\x1f")
     if len(parts) != 7:
