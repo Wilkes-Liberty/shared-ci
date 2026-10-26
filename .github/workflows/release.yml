@@ -55,6 +55,22 @@ on:
           the run rather than publishing an empty Release.
         type: string
         default: CHANGELOG.md
+      fragments-dir:
+        description: Pending fragment directory. Final releases require compiled fragments.
+        type: string
+        default: changelog.d
+      extra-sections:
+        description: Additional fragment sections, matching the changelog checker.
+        type: string
+        default: ''
+      preserve-history:
+        description: Preserve historical archive formatting during an RC fragment preview.
+        type: boolean
+        default: false
+      allow-initial-release:
+        description: Allow an RC preview before the first versioned changelog archive exists.
+        type: boolean
+        default: false
 
 permissions:
   contents: write # required to create the Release
@@ -77,13 +93,21 @@ jobs:
             echo "Trigger this workflow from 'on: push: tags: [v*]' only." >&2
             exit 1
           fi
-          # Same shape the `make release` guards accept, so a tag that could be
-          # cut is a tag that can be published.
-          printf '%s' "${GITHUB_REF_NAME}" \
-            | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || {
-            echo "ERROR: tag '${GITHUB_REF_NAME}' is not vMAJOR.MINOR.PATCH[-suffix]." >&2
-            exit 1
-          }
+          python3 -I <<'PY'
+          import os
+          import re
+          tag = os.environ["GITHUB_REF_NAME"]
+          version = r"(?:0|[1-9][0-9]*)"
+          match = re.fullmatch(
+              rf"v{version}\.{version}\.{version}(?:-([0-9A-Za-z.-]+))?", tag
+          )
+          if not match:
+              raise SystemExit("ERROR: expected vMAJOR.MINOR.PATCH[-prerelease]")
+          suffix = match.group(1)
+          if suffix and any(not part or (part.isdigit() and len(part) > 1 and part[0] == "0")
+                            for part in suffix.split(".")):
+              raise SystemExit("ERROR: invalid prerelease identifier")
+          PY
 
       - name: Check out the tagged commit
         uses: actions/checkout@v7
@@ -96,11 +120,60 @@ jobs:
       - name: Extract release notes from the CHANGELOG
         env:
           CHANGELOG: ${{ inputs.changelog-path }}
+          FRAGMENTS_DIR: ${{ inputs.fragments-dir }}
+          EXTRA_SECTIONS: ${{ inputs.extra-sections }}
+          ALLOW_INITIAL_RELEASE: ${{ inputs.allow-initial-release }}
+          PRESERVE_HISTORY: ${{ inputs.preserve-history }}
+          SCRIPTS_REF: ${{ job.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
 
           [ -r "$CHANGELOG" ] || { echo "ERROR: cannot read ${CHANGELOG}" >&2; exit 2; }
+
+          # Final notes must already be compiled. RCs render a read-only preview
+          # from the exact shared workflow revision so pending entries are kept.
+          pending=$(python3 -I <<'PY'
+          import os
+          from pathlib import Path
+          directory = Path(os.environ["FRAGMENTS_DIR"])
+          if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+              raise SystemExit("Fragment path must be a real directory")
+          print("yes" if directory.exists() and any(
+              not item.name.startswith(".") for item in directory.iterdir()
+          ) else "no")
+          PY
+          )
+          if [ "$pending" = "yes" ]; then
+            case "$TAG" in
+              *-rc.*)
+                : "${SCRIPTS_REF:?Cannot locate the trusted fragment compiler}"
+                compiler="$RUNNER_TEMP/release-changelog.py"
+                gh api "repos/Wilkes-Liberty/shared-ci/contents/.github/scripts/changelog-fragments.py?ref=${SCRIPTS_REF}" \
+                  -H "Accept: application/vnd.github.raw" > "$compiler"
+                test -s "$compiler"
+                series="${TAG#v}"
+                series="${series%%-rc.*}"
+                args=(render --changelog "$CHANGELOG" --fragments "$FRAGMENTS_DIR"
+                      --version "$series" --date "$(date -u +%F)"
+                      --extra-sections "${EXTRA_SECTIONS:-}")
+                if [ "${ALLOW_INITIAL_RELEASE:-false}" = "true" ]; then
+                  args+=(--allow-initial-release)
+                fi
+                if [ "${PRESERVE_HISTORY:-false}" = "true" ]; then
+                  args+=(--preserve-history)
+                fi
+                preview="$RUNNER_TEMP/release-changelog-preview.md"
+                python3 -I "$compiler" "${args[@]}" > "$preview"
+                CHANGELOG="$preview"
+                ;;
+              *)
+                echo "ERROR: pending fragments must be compiled in the release-finalize commit before tagging." >&2
+                exit 1
+                ;;
+            esac
+          fi
 
           # Literal prefix match, not a regex: the heading contains [ and ],
           # which would be a character class.
@@ -112,7 +185,13 @@ jobs:
             ' "$CHANGELOG"
           }
           section_body() {
-            printf '%s\n' "$1" | tail -n +2 | grep -v '^[[:space:]]*$' || true
+            printf '%s\n' "$1" | python3 -I -c '
+          import re, sys
+          body = "\n".join(sys.stdin.read().splitlines()[1:])
+          body = re.sub(r"<!--[\s\S]*?-->", "", body)
+          print("\n".join(line for line in body.splitlines()
+                          if line.strip() and not re.match(r"^\s*#{1,6}(?:\s|$)", line)
+                          and not re.match(r"^\s*\[[^]]+\]:", line)))'
           }
 
           # An RC prefers [Unreleased]: these repositories do not relabel
@@ -170,14 +249,14 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
 
-          # RCs are marked prerelease so the Releases page separates them from
-          # finals at a glance, and so `releases/latest` — which excludes
+          # Every accepted prerelease suffix is marked, separating it from
+          # finals and ensuring `releases/latest` — which excludes
           # prereleases — keeps resolving to the newest FINAL. Sibling deploys
           # pin infra by that endpoint, so mislabelling an RC here would change
           # what other repositories deploy with.
-          PRERELEASE=""
+          PRERELEASE="--prerelease=false"
           case "$TAG" in
-            *-rc.*) PRERELEASE="--prerelease" ;;
+            *-*) PRERELEASE="--prerelease" ;;
           esac
 
           # Idempotent: re-running on an existing tag updates the notes instead

@@ -412,6 +412,20 @@ class DefaultRewriteTest(unittest.TestCase):
 
 
 class TrailerAndDateTest(unittest.TestCase):
+    def test_mailmap_does_not_change_raw_human_identity(self):
+        repo = Repo()
+        self.addCleanup(repo.cleanup)
+        Path(repo.dir, ".mailmap").write_text(
+            f"Different Human <different@example.invalid> {HUMAN[0]} <{HUMAN[1]}>\n"
+        )
+        repo._git("add", ".mailmap")
+        repo.commit("Feature\n\n" + trailer("Cursor Agent <agent@cursor.com>"))
+        before = repo.log_identity()
+        result = repo.strip()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(repo.log_identity(), before)
+        self.assertEqual(repo.check().returncode, CLEAN)
+
     def setUp(self):
         self.repo = Repo()
 
@@ -472,6 +486,25 @@ class TrailerAndDateTest(unittest.TestCase):
 class PrBodyCleanupTest(unittest.TestCase):
     def setUp(self):
         self.strip = load_script("strip_attribution_body", STRIP)
+
+    def test_footer_keeps_earlier_html_and_prose(self):
+        summary = "<div>Human summary</div>\n\nMigration instructions.\n\n"
+        footer = '<div><div><a href="https://cursor.com/agents/123">Open</a></div></div>\n'
+        self.assertEqual(self.strip.clean_cursor_pr_body(summary + footer),
+                         summary.rstrip() + "\n")
+
+    def test_code_examples_are_not_removed(self):
+        for fence in ("```", "~~~~"):
+            body = ("Documented examples:\n" + fence + "text\nGenerated with "
+                    + "Claude\n<!-- CURSOR_SUMMARY -->\nExample.\n"
+                    + "<!-- /CURSOR_SUMMARY -->\n" + fence + "\n")
+            with self.subTest(fence=fence):
+                self.assertIsNone(self.strip.clean_cursor_pr_body(body))
+
+    def test_separate_summaries_preserve_intervening_text(self):
+        block = "<!-- CURSOR_SUMMARY -->\nOverview.\n<!-- /CURSOR_SUMMARY -->\n"
+        cleaned = self.strip.clean_cursor_pr_body(block + "Human decision.\n" + block)
+        self.assertEqual(cleaned, "Human decision.\n")
 
     def test_wrappers_and_footer_removed_summary_kept(self):
         body = (
