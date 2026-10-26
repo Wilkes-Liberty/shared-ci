@@ -148,7 +148,7 @@ concurrency:
   # in the same second — observed on the ruleset-required flavor across three
   # consumer repos at once — cancellation kills one of them at 0-1s, and a
   # CANCELLED run of a required-class control wears a red X that reads as the
-  # control failing until a human re-runs it. Duplicates in the same group now
+  # control failing until an operator re-runs it. Duplicates in the same group now
   # QUEUE instead: both complete, both green, and the cost is one duplicated
   # ~10-second job instead of an org-wide habit of ignoring red attribution
   # checks. Cancellation here bought economy, not correctness — do not
@@ -303,7 +303,7 @@ jobs:
       # the head branch is. If Actions is permitted to bypass branch
       # protection, that rewrites the default branch's history. The blast
       # radius is the whole repository, and the control does not need it: the
-      # scan below still runs and still fails the check, a human just clears it
+      # scan below still runs and still fails the check, an operator just clears it
       # by hand.
       - name: Strip AI attribution trailers from commits
         id: strip
@@ -315,7 +315,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           BRANCH: ${{ github.head_ref }}
           ORIGINAL_HEAD: ${{ github.event.pull_request.head.sha }}
-          # Fallback human when a commit has an AI author/committer and no
+          # Fallback identity when a commit has an AI author/committer and no
           # human Co-authored-by trailer. Must be @users.noreply.github.com
           # (operator lock 2026-08-22): never @wilkesliberty.com. The script
           # defaults to Jeremy Michael Cerda <jmcerda@users.noreply.github.com>
@@ -348,7 +348,7 @@ jobs:
           COUNT: ${{ steps.strip.outputs.count }}
         run: |
           set -euo pipefail
-          body="Removed AI attribution from **${COUNT}** commit(s) on this branch (standing order §1). Trees and author/committer dates are preserved. AI author/committer identities are rewritten to the human operator when a human Co-authored-by trailer or the PR opener is available. Re-run of this check will confirm the tip is clean."
+          body="Removed AI attribution from **${COUNT}** commit(s) on this branch (standing order §1). Trees and author/committer dates are preserved. AI author/committer identities are rewritten to the operator when a human Co-authored-by trailer or the PR opener is available. Re-run of this check will confirm the tip is clean."
           gh pr comment "$PR" --body "$body"
 
       # Fetch current metadata before scanning, including required/fork runs.

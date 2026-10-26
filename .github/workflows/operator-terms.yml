@@ -1,0 +1,63 @@
+name: Operator terminology
+
+# Warn-only lint: flags "human(s)" used for people in Markdown, prompts and
+# .github/** files. Standing rule: refer to people as operator(s), never
+# human(s). Annotations only: every outcome of this job, including a failed
+# fetch or a crashed script, is a green check with ::warning annotations.
+# The allowlist and scope live in check-operator-terms.py; a single line can
+# opt out with an `operator-terminology: allow` comment.
+#
+# Callers:
+#   jobs:
+#     operator-terms:
+#       uses: Wilkes-Liberty/shared-ci/.github/workflows/operator-terms.yml@v1
+#
+# Trust: the script is fetched from Wilkes-Liberty/shared-ci at
+# job.workflow_sha, the commit this workflow file was resolved to, never from
+# the caller's tree. It runs with `python3 -I`, so modules in the checkout
+# under review are not imported. This repository's reference caller is
+# terminology.yml.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  operator-terms:
+    name: Operator terminology (warn-only)
+    runs-on: ubuntu-latest
+    # A hung job would end red; the scan takes seconds.
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        # A failed checkout must not turn the check red. The scan then finds
+        # no git tree and reports that as a warning.
+        continue-on-error: true
+        uses: actions/checkout@v7
+
+      - name: Scan (warn-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: Wilkes-Liberty/shared-ci
+          SCRIPTS_REF: ${{ job.workflow_sha }}
+        run: |
+          # The runner's default shell is `bash -e -o pipefail`. Turn -e off:
+          # warn-only means no shell error may end this step red.
+          set +e
+          script="$RUNNER_TEMP/trusted/check-operator-terms.py"
+          mkdir -p "$RUNNER_TEMP/trusted"
+          if [ -z "${SCRIPTS_REF}" ]; then
+            echo "::warning::operator-terminology: job.workflow_sha is empty; scan skipped."
+            exit 0
+          fi
+          if ! gh api "repos/${SOURCE_REPO:-Wilkes-Liberty/shared-ci}/contents/.github/scripts/check-operator-terms.py?ref=${SCRIPTS_REF}" \
+              -H "Accept: application/vnd.github.raw" > "$script" || ! [ -s "$script" ]; then
+            echo "::warning::operator-terminology: could not fetch the lint script; scan skipped."
+            exit 0
+          fi
+          if ! python3 -I "$script"; then
+            echo "::warning::operator-terminology: the lint script exited non-zero; treated as a warning."
+          fi
+          exit 0

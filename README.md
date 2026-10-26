@@ -13,13 +13,13 @@ else.
 
 ### attribution.yml — check `No AI attribution`
 
-Wilkes & Liberty work is authored by its human operators, and this workflow
+Wilkes & Liberty work is authored by its operators, and this workflow
 keeps authorship credit that way on every pull request:
 
 1. **Strips** removable AI credit lines from commit messages on the PR branch
    (credit trailers naming an AI author, "Generated with …" footers, the
    robot-emoji marker line) **and rewrites AI author/committer identities
-   to a human** (prefer a human Co-authored-by trailer already on the
+   to a human** (prefer a human Co-authored-by trailer already on the <!-- operator-terminology: allow -->
    commit — hosted Cursor Cloud Agents stamp the session initiator this
    way — else the PR opener as `login@users.noreply.github.com`, else
    Jeremy Michael Cerda `<jmcerda@users.noreply.github.com>`). Trees and
@@ -175,6 +175,49 @@ Fragment filenames must be unique across concurrent PRs, for example `1234-cache
 For callers with automatic labeling, run the reusable workflow after that job and propagate labeling failures. The shared gate reads current labels: a label written with `GITHUB_TOKEN` does not create a new `labeled` workflow run. On push or deliberately skipped labeling, allow the shared structure job to run with an explicit dependency condition.
 
 The reusable workflow uses read-only repository and pull-request permissions and fetches its checker from the exact commit of the called workflow. Python runs in isolated mode. Consumers keep configuration and stable status aliases; parsing and compilation remain centralized.
+
+### operator-terms.yml — warn-only terminology lint
+
+Standing rule: refer to people as operator(s), never human(s). This workflow
+annotates "human(s)" in Markdown, prompt files, files under `prompts/`,
+`agents/`, `skills/` and `rules/`, and everything under `.github/`. It never
+fails a build: hits, a failed script fetch and a crashed script are all
+`::warning` annotations on a green check.
+
+It skips source code (`*.py`, `*.sh` and similar, where the word is usually
+an identifier), translation files (`*.po`, `*.pot`), `CHANGELOG.md`, and
+vendored trees (`node_modules/`, `vendor/`, Drupal core and contrib). It
+allows "human-readable", "Human Resources", humanize\*, identifiers such as
+the `needs-human` label, `human_*` and `HUMAN-CHECKPOINTS`, product copy
+"human editor", the rule statement "human(s)", and anything in inline code.
+Mark any other keep case, such as a third-party quote, with an inline comment
+on the same line:
+
+```markdown
+"Written by a human, for humans." <!-- operator-terminology: allow -->
+```
+
+In YAML, use `# operator-terminology: allow`. Run it locally from a
+repository root with `python3 -I check-operator-terms.py`; `--strict` turns
+hits into errors and a non-zero exit, for a later switch to enforcement.
+
+This repository's reference caller is `.github/workflows/terminology.yml`.
+Other repositories pin the tag:
+
+```yaml
+# .github/workflows/terminology.yml
+name: Terminology
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  operator-terms:
+    uses: Wilkes-Liberty/shared-ci/.github/workflows/operator-terms.yml@v1
+```
+
+Do not adopt it in a consuming repository until `v1` points at a release that
+contains it.
 
 ## Versioning
 
