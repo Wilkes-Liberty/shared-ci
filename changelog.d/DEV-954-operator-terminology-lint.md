@@ -3,9 +3,11 @@ section: Added
 ---
 - **Warn-only operator-terminology lint.** Reusable workflow
   `operator-terms.yml` and `check-operator-terms.py` annotate "human(s)" in
-  Markdown, prompts and `.github/**` files. Standing rule: refer to people as
-  operator(s), never human(s). Allowlisted: "human-readable", "Human
-  Resources", humanize*, identifiers such as `needs-human` and
-  `HUMAN-CHECKPOINTS`, third-party quotes, inline code, and lines marked
-  `operator-terminology: allow`. `--strict` exists for a later switch to
-  failing. (DEV-954)
+  Markdown, prompts and `.github/**` files, with `terminology.yml` as this
+  repository's reference caller. The job never fails: hits, a failed script
+  fetch and a crashed script are warnings. Source code, `*.po`/`*.pot` files
+  and `CHANGELOG.md` are skipped. Keep cases such as "human-readable",
+  "Human Resources", the `needs-human` label, `HUMAN-CHECKPOINTS` and
+  "human editor" are allowed, and any line can opt out with an
+  `operator-terminology: allow` comment. `--strict` exists for a later
+  switch to failing. (DEV-954)
