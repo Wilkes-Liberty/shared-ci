@@ -1,0 +1,55 @@
+"""Attribution workflow behavior against synthetic API responses."""
+
+import json
+from pathlib import Path
+
+from workflow_test_support import WorkflowFixture
+
+
+class AttributionWorkflowContracts(WorkflowFixture):
+    def test_body_helper_uses_isolated_imports(self):
+        self.body("Human summary.")
+        (self.work / "json.py").write_text("raise RuntimeError('repository module imported')\n")
+        result = self.run_step("attribution.yml", "Strip AI credit from the PR body")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_failed_patch_keeps_remote_body_for_scan(self):
+        body = "Summary.\nGenerated with " + "Claude\n"
+        self.body(body)
+        self.env["FAIL_PATCH"] = "1"
+        result = self.run_step("attribution.yml", "Strip AI credit from the PR body")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.runtime / "pr-body.txt").read_text(), body)
+
+    def test_stale_event_never_overwrites_newer_body(self):
+        old = "Old summary.\nGenerated with " + "Claude\n"
+        new = "New human summary."
+        self.body(old, new)
+        result = self.run_step("attribution.yml", "Strip AI credit from the PR body")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(Path(self.env["PROOF_STATE"]).read_text())["body"], new)
+        self.assertEqual((self.runtime / "pr-body.txt").read_text(), new)
+        self.assertEqual((self.runtime / "pr-title.txt").read_text(), "current title")
+
+    def test_scan_only_never_writes(self):
+        body = "Summary.\nGenerated with " + "Claude\n"
+        self.body(body)
+        self.env["ALLOW_CLEAN"] = "false"
+        result = self.run_step("attribution.yml", "Strip AI credit from the PR body")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(Path(self.env["PROOF_STATE"]).read_text())["body"], body)
+
+    def test_successful_cleanup_scans_saved_body(self):
+        self.body("Summary.\nGenerated with " + "Claude\n")
+        result = self.run_step("attribution.yml", "Strip AI credit from the PR body")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        remote = json.loads(Path(self.env["PROOF_STATE"]).read_text())["body"]
+        self.assertEqual((self.runtime / "pr-body.txt").read_text(), remote)
+        self.assertEqual(remote, "Summary.\n")
+
+    def test_failed_metadata_read_fails_closed(self):
+        self.body("Summary.")
+        self.env["FAIL_GET"] = "1"
+        result = self.run_step("attribution.yml", "Strip AI credit from the PR body")
+        self.assertNotEqual(result.returncode, 0)
+

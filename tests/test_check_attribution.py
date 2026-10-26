@@ -20,6 +20,7 @@ not bypassed: a planted trailer must still fail the check.
 Run: python3 -m unittest discover -s tests
 """
 
+import importlib.util
 import subprocess
 import tempfile
 import unittest
@@ -489,6 +490,64 @@ class CursorSummaryBodyTest(unittest.TestCase):
         cleaned = self.strip.clean_cursor_pr_body(body)
         self.assertIsNotNone(cleaned)
         self.assertEqual(self.repo.check(body=cleaned).returncode, CLEAN)
+
+
+class CursorPrBodyMarkerCheckTest(unittest.TestCase):
+    """DEV-1009: the body scan ignores exact section markers, not the rest.
+
+    Markers plus a credit trailer, after strip, pass. Mid-prose credit
+    sitting outside the markers still fails — ignoring the comments must
+    not ignore the body.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+        strip_path = (
+            Path(__file__).resolve().parent.parent
+            / ".github" / "scripts" / "strip-attribution.py"
+        )
+        spec = importlib.util.spec_from_file_location("strip_attribution", strip_path)
+        self.strip = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.strip)
+        self.repo.commit("a normal change")
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_markers_plus_credit_keeps_markers_drops_credit_check_passes(self):
+        body = (
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Keep the section markers so the next update replaces in place.\n\n"
+            + trailer("Cursor Agent <cursoragent@cursor.com>") + "\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        cleaned = self.strip.clean_cursor_pr_body(body)
+        self.assertIsNotNone(cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_BEGIN -->", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_END -->", cleaned)
+        self.assertNotIn("Cursor Agent", cleaned)
+        self.assertEqual(self.repo.check(body=cleaned).returncode, CLEAN)
+
+    def test_credit_outside_the_markers_still_fails(self):
+        body = (
+            "This change is AI-generated.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Human-written summary with no authorship claim.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        self.assertIsNone(self.strip.clean_cursor_pr_body(body))
+        result = self.repo.check(body=body)
+        self.assertEqual(result.returncode, DIRTY)
+        self.assertIn("AI-generated", result.stdout)
+
+    def test_markers_alone_do_not_fail_the_body_check(self):
+        body = (
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Human-written summary with no authorship claim.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        self.assertIsNone(self.strip.clean_cursor_pr_body(body))
+        self.assertEqual(self.repo.check(body=body).returncode, CLEAN)
 
 
 class AnnotationEscapingTest(unittest.TestCase):

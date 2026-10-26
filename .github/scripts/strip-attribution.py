@@ -9,7 +9,7 @@ when it can, so the operator does not have to hand-rebase every Copilot
 trailer or Cursor Agent author stamp before merge.
 
 Scope:
-  * Rewrites **commit messages** in base..head (non-merge commits) to remove
+  * Rewrites **commit messages** in base..head on the first-parent chain to remove
     attribution *shapes* — credit trailers naming an AI author, "Generated
     with <AI>" footers, and the robot-emoji marker line.
   * Rewrites **author and/or committer identity** when that slot would fail
@@ -44,10 +44,14 @@ Scope:
     GIT_COMMITTER_DATE stays the original committer date. A human committer
     is left untouched (server-side "Commit suggestion" on someone else's
     work must not overwrite that human).
-  * ``clean_cursor_pr_body`` removes Cursor cloud wrapper markers and Bugbot
-    ``CURSOR_SUMMARY`` blocks from a PR body string. The workflow PATCHes
-    GitHub when those markers are present; this script does not talk to the
-    API.
+  * ``clean_cursor_pr_body`` removes removable AI credit from a PR body
+    string: attribution trailer lines, "Generated with <AI>" / robot-emoji
+    lines, a trailing ``cursor.com/agents`` footer, and Bugbot
+    ``CURSOR_SUMMARY`` blocks. Structural ``CURSOR_AGENT_PR_BODY_*`` HTML
+    comments are left in place so a later Cursor agent description update
+    can replace its section instead of appending a second copy (DEV-1009 /
+    agency#28). The workflow PATCHes GitHub when removable credit is
+    present; this script does not talk to the API.
   * Does **not** rewrite mid-subject prose like "AI-assisted refactor" —
     those still fail the check for a human reword (auto-rewriting subjects
     is too lossy).
@@ -72,6 +76,7 @@ GitHub Actions: writes `stripped` and `count` to $GITHUB_OUTPUT when set.
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import os
 import re
 import subprocess
@@ -205,27 +210,84 @@ DEFAULT_REWRITE_HUMAN = (
 # STRIP_AUTHOR_* is only consumed when it matches this shape.
 NOREPLY_EMAIL = re.compile(r"@users\.noreply\.github\.com\s*$", re.I)
 
+# Structural section markers Cursor uses to replace the agent-written body
+# in place. Keep identical to check-attribution.py. These are not credit
+# and must not be deleted — stripping them is what made agency#28 append
+# a second (then third) copy of the description (DEV-1009).
 CURSOR_PR_BODY_BEGIN = "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->"
 CURSOR_PR_BODY_END = "<!-- CURSOR_AGENT_PR_BODY_END -->"
 
 # Trailing footer Cursor appends after the end marker. Only a <div> at the
 # end of the body that mentions cursor.com/agents is removed, so a mention
 # of that URL in the human-written summary is left alone.
-CURSOR_PR_FOOTER = re.compile(
-    r"(?:\r?\n)*<div\b[^>]*>[\s\S]*?cursor\.com/agents[\s\S]*?</div>[ \t]*(?:\r?\n)*\Z",
-    re.I,
-)
+class FooterDivs(HTMLParser):
+    """Locate complete top-level divs without consuming sibling prose."""
+
+    def __init__(self, body):
+        super().__init__(convert_charrefs=False)
+        self.offsets = [0]
+        for line in body.splitlines(keepends=True):
+            self.offsets.append(self.offsets[-1] + len(line))
+        self.stack = []
+        self.spans = []
+        self.feed(body)
+
+    def absolute_offset(self):
+        line, column = self.getpos()
+        return self.offsets[line - 1] + column
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "div":
+            self.stack.append(self.absolute_offset())
+
+    def handle_endtag(self, tag):
+        if tag == "div" and self.stack:
+            start = self.stack.pop()
+            if not self.stack:
+                self.spans.append((start, self.absolute_offset() + len("</div>")))
+
+
+def code_ranges(body):
+    """Protect Markdown code examples from automatic prose cleanup."""
+    ranges = []
+    fence = None
+    start = offset = 0
+    for line in body.splitlines(keepends=True):
+        match = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})", line)
+        if match:
+            marker = match.group(1)
+            if fence is None:
+                fence, start = marker, offset
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                ranges.append((start, offset + len(line)))
+                fence = None
+        offset += len(line)
+    if fence is not None:
+        ranges.append((start, len(body)))
+    ranges.extend((m.start(), m.end()) for m in
+                  re.finditer(r"(`+)(.+?)\1", body, re.S))
+    return ranges
+
+
+def footer_span(body):
+    protected = code_ranges(body)
+    for start, end in reversed(FooterDivs(body).spans):
+        if any(a <= start < b for a, b in protected):
+            continue
+        if not body[end:].strip() and "cursor.com/agents" in body[start:end].lower():
+            return start, len(body)
+    return None
 
 # Bugbot appends this block in place on `edited` / `synchronize`. Its prose
 # can contain the same authorship-marker hits the body scanner flags, even
 # when the human-written body does not (shared-ci#16 / webcms#828). Strip
 # the whole block.
-# Greedy on purpose: Bugbot's own overview often quotes the marker pair
-# inside the block; a non-greedy match would stop at that inner end and
-# leave an orphaned tail that still trips the scanner.
+# Standalone marker lines delimit a block; quoted marker examples inside it
+# are prose. Match each block independently so intervening human text stays.
 CURSOR_SUMMARY_BLOCK = re.compile(
-    r"<!--\s*CURSOR_SUMMARY\s*-->[\s\S]*<!--\s*/CURSOR_SUMMARY\s*-->",
-    re.I,
+    r"^[ \t]*<!--[ \t]*CURSOR_SUMMARY[ \t]*-->[ \t]*$"
+    r"[\s\S]*?^[ \t]*<!--[ \t]*/CURSOR_SUMMARY[ \t]*-->[ \t]*$",
+    re.I | re.M,
 )
 
 
@@ -344,30 +406,98 @@ def identity_changed(old: dict, new: dict) -> bool:
     )
 
 
-def clean_cursor_pr_body(body: str) -> Optional[str]:
-    """Return a cleaned PR body if Cursor chrome is present, else None.
+def should_strip_line(line: str) -> bool:
+    # Ignore pure whitespace; keep blank lines for structure until we collapse.
+    if not line.strip():
+        return False
+    return any(p.search(line) for p in STRIP_LINE_PATTERNS)
 
-    Removes the BEGIN/END HTML comments, a trailing
-    ``<div>…cursor.com/agents…</div>`` footer, and Bugbot
-    ``<!-- CURSOR_SUMMARY -->…<!-- /CURSOR_SUMMARY -->`` blocks. The
-    human-written summary outside those markers is preserved. Returns None
-    when none of those markers are present so callers can no-op without a
-    GitHub write.
+
+def strip_pr_body_credit_lines(body: str) -> Tuple[str, List[str]]:
+    """Remove attribution shapes that are safe to auto-drop from a PR body.
+
+    Same line patterns as commit-message stripping. The first line is not
+    special — a PR body has no subject to preserve. Structural
+    ``CURSOR_AGENT_PR_BODY_*`` comments are not credit and are kept.
+    Returns ``(body, [])`` when nothing matched, so a markers-only body
+    is never rewritten.
+    """
+    raw = body.replace("\r\n", "\n").replace("\r", "\n")
+    ended_with_newline = raw.endswith("\n")
+    if ended_with_newline:
+        raw = raw[:-1]
+    lines = raw.split("\n")
+    removed: List[str] = []
+    out: List[str] = []
+    protected = code_ranges(raw)
+    offset = 0
+    for line in lines:
+        in_code = any(a < offset + len(line) and offset < b for a, b in protected)
+        offset += len(line) + 1
+        if in_code:
+            out.append(line)
+            continue
+        if line.strip() in (CURSOR_PR_BODY_BEGIN, CURSOR_PR_BODY_END):
+            out.append(line)
+            continue
+        if should_strip_line(line):
+            removed.append(line)
+            continue
+        out.append(line)
+    if not removed:
+        return body, []
+    while out and out[-1].strip() == "":
+        out.pop()
+    collapsed: List[str] = []
+    blank_run = False
+    for line in out:
+        if line.strip() == "":
+            if blank_run:
+                continue
+            blank_run = True
+            collapsed.append("")
+        else:
+            blank_run = False
+            collapsed.append(line)
+    cleaned = "\n".join(collapsed)
+    if cleaned or ended_with_newline:
+        cleaned += "\n"
+    return cleaned, removed
+
+
+def clean_cursor_pr_body(body: str) -> Optional[str]:
+    """Return a cleaned PR body if removable AI credit is present, else None.
+
+    Removes a trailing ``<div>…cursor.com/agents…</div>`` footer, Bugbot
+    ``<!-- CURSOR_SUMMARY -->…<!-- /CURSOR_SUMMARY -->`` blocks, and
+    attribution trailer / "Generated with" / robot-emoji lines. Structural
+    ``CURSOR_AGENT_PR_BODY_*`` HTML comments stay so a later agent update
+    can find its section (DEV-1009). The human-written summary is
+    preserved. Returns None when there is nothing removable so callers
+    can no-op without a GitHub write — including a body that only carries
+    the section markers.
     """
     if not body:
         return None
-    has_begin = CURSOR_PR_BODY_BEGIN in body
-    has_end = CURSOR_PR_BODY_END in body
-    has_footer = CURSOR_PR_FOOTER.search(body) is not None
-    has_summary = CURSOR_SUMMARY_BLOCK.search(body) is not None
-    if not (has_begin or has_end or has_footer or has_summary):
+    footer = footer_span(body)
+    has_footer = footer is not None
+    protected = code_ranges(body)
+    summaries = [m for m in CURSOR_SUMMARY_BLOCK.finditer(body)
+                 if not any(a <= m.start() < b for a, b in protected)]
+    has_summary = bool(summaries)
+    _, credit_removed = strip_pr_body_credit_lines(body)
+    if not (has_footer or has_summary or credit_removed):
         return None
-    cleaned = body.replace(CURSOR_PR_BODY_BEGIN, "").replace(CURSOR_PR_BODY_END, "")
-    cleaned = CURSOR_PR_FOOTER.sub("", cleaned)
-    cleaned = CURSOR_SUMMARY_BLOCK.sub("", cleaned)
+    spans = [(m.start(), m.end()) for m in summaries]
+    if footer:
+        spans.append(footer)
+    cleaned = body
+    for start, end in sorted(spans, reverse=True):
+        cleaned = cleaned[:start] + cleaned[end:]
+    cleaned, _ = strip_pr_body_credit_lines(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"^\s*\n", "", cleaned)
-    cleaned = re.sub(r"\n[ \t]*\Z", "\n", cleaned)
+    cleaned = re.sub(r"(?:\n[ \t]*)+\Z", "\n", cleaned)
     if cleaned and not cleaned.endswith("\n"):
         cleaned += "\n"
     return cleaned
@@ -384,13 +514,6 @@ def git(args: List[str], *, check: bool = True, text: bool = True) -> subprocess
 
 def short(rev: str) -> str:
     return rev[:12] if re.fullmatch(r"[0-9a-f]{40}", rev) else rev
-
-
-def should_strip_line(line: str) -> bool:
-    # Ignore pure whitespace; keep blank lines for structure until we collapse.
-    if not line.strip():
-        return False
-    return any(p.search(line) for p in STRIP_LINE_PATTERNS)
 
 
 def clean_message(message: str) -> Tuple[str, List[str]]:
@@ -489,8 +612,8 @@ def commits_oldest_first(base: str, head: str) -> List[Tuple[str, str]]:
 
 
 def commit_meta(sha: str) -> dict:
-    """Author/committer identity and dates for a commit (raw %aN etc.)."""
-    fmt = "%aN%x1f%aE%x1f%aD%x1f%cN%x1f%cE%x1f%cD%x1f%T"
+    """Raw author/committer identity and dates, independent of mailmap."""
+    fmt = "%an%x1f%ae%x1f%aD%x1f%cn%x1f%ce%x1f%cD%x1f%T"
     line = git(["log", "-1", f"--format={fmt}", sha]).stdout.rstrip("\n")
     parts = line.split("\x1f")
     if len(parts) != 7:

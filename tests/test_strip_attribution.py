@@ -153,12 +153,15 @@ class Repo:
             argv, cwd=self.dir, capture_output=True, text=True, env=env
         )
 
-    def check(self):
+    def check(self, title=None, body=None):
+        argv = [str(CHECK), "--base", self.base, "--head", "HEAD"]
+        for flag, text in (("--title-file", title), ("--body-file", body)):
+            if text is not None:
+                path = Path(self.dir) / (flag.strip("-") + ".txt")
+                path.write_text(text)
+                argv += [flag, str(path)]
         return subprocess.run(
-            [str(CHECK), "--base", self.base, "--head", "HEAD"],
-            cwd=self.dir,
-            capture_output=True,
-            text=True,
+            argv, cwd=self.dir, capture_output=True, text=True
         )
 
     def cleanup(self):
@@ -187,6 +190,8 @@ class PatternSyncTest(unittest.TestCase):
         self.assertEqual(check.IDENTITY_UNAMBIGUOUS, strip.IDENTITY_UNAMBIGUOUS)
         self.assertEqual(check.IDENTITY_AMBIGUOUS, strip.IDENTITY_AMBIGUOUS)
         self.assertEqual(check.IDENTITY_BOT_MARKER, strip.IDENTITY_BOT_MARKER)
+        self.assertEqual(check.CURSOR_PR_BODY_BEGIN, strip.CURSOR_PR_BODY_BEGIN)
+        self.assertEqual(check.CURSOR_PR_BODY_END, strip.CURSOR_PR_BODY_END)
 
     def test_identity_scan_agrees_on_cursor_agent_and_humans(self):
         check = load_script("check_attribution", CHECK)
@@ -407,6 +412,20 @@ class DefaultRewriteTest(unittest.TestCase):
 
 
 class TrailerAndDateTest(unittest.TestCase):
+    def test_mailmap_does_not_change_raw_human_identity(self):
+        repo = Repo()
+        self.addCleanup(repo.cleanup)
+        Path(repo.dir, ".mailmap").write_text(
+            f"Different Human <different@example.invalid> {HUMAN[0]} <{HUMAN[1]}>\n"
+        )
+        repo._git("add", ".mailmap")
+        repo.commit("Feature\n\n" + trailer("Cursor Agent <agent@cursor.com>"))
+        before = repo.log_identity()
+        result = repo.strip()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(repo.log_identity(), before)
+        self.assertEqual(repo.check().returncode, CLEAN)
+
     def setUp(self):
         self.repo = Repo()
 
@@ -468,6 +487,25 @@ class PrBodyCleanupTest(unittest.TestCase):
     def setUp(self):
         self.strip = load_script("strip_attribution_body", STRIP)
 
+    def test_footer_keeps_earlier_html_and_prose(self):
+        summary = "<div>Human summary</div>\n\nMigration instructions.\n\n"
+        footer = '<div><div><a href="https://cursor.com/agents/123">Open</a></div></div>\n'
+        self.assertEqual(self.strip.clean_cursor_pr_body(summary + footer),
+                         summary.rstrip() + "\n")
+
+    def test_code_examples_are_not_removed(self):
+        for fence in ("```", "~~~~"):
+            body = ("Documented examples:\n" + fence + "text\nGenerated with "
+                    + "Claude\n<!-- CURSOR_SUMMARY -->\nExample.\n"
+                    + "<!-- /CURSOR_SUMMARY -->\n" + fence + "\n")
+            with self.subTest(fence=fence):
+                self.assertIsNone(self.strip.clean_cursor_pr_body(body))
+
+    def test_separate_summaries_preserve_intervening_text(self):
+        block = "<!-- CURSOR_SUMMARY -->\nOverview.\n<!-- /CURSOR_SUMMARY -->\n"
+        cleaned = self.strip.clean_cursor_pr_body(block + "Human decision.\n" + block)
+        self.assertEqual(cleaned, "Human decision.\n")
+
     def test_wrappers_and_footer_removed_summary_kept(self):
         body = (
             "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
@@ -482,10 +520,19 @@ class PrBodyCleanupTest(unittest.TestCase):
         self.assertIsNotNone(cleaned)
         self.assertIn("Rewrite Cursor Agent identity before the check.", cleaned)
         self.assertIn("Callers stay on @v1.", cleaned)
-        self.assertNotIn("CURSOR_AGENT_PR_BODY_BEGIN", cleaned)
-        self.assertNotIn("CURSOR_AGENT_PR_BODY_END", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_BEGIN -->", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_END -->", cleaned)
         self.assertNotIn("cursor.com/agents", cleaned)
         self.assertNotIn("<div>", cleaned)
+
+    def test_markers_only_are_not_rewritten(self):
+        """Section markers are not credit; rewriting them caused agency#28."""
+        body = (
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Human-written summary with no authorship claim.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        self.assertIsNone(self.strip.clean_cursor_pr_body(body))
 
     def test_no_markers_returns_none(self):
         body = (
@@ -542,6 +589,52 @@ class PrBodyCleanupTest(unittest.TestCase):
         self.assertIn("Human summary.", cleaned)
         self.assertNotIn("CURSOR_SUMMARY", cleaned)
         self.assertNotIn("AI-generated", cleaned)
+
+
+class CursorPrBodyMarkerRegressionTest(unittest.TestCase):
+    """DEV-1009 / agency#28: keep section markers, drop credit, still fail remaining credit.
+
+    A body with the markers plus a credit trailer comes out with the
+    markers kept, the credit removed, and the check passing. A body with
+    mid-prose credit outside the markers is not auto-rewritten and still
+    fails the check.
+    """
+
+    def setUp(self):
+        self.repo = Repo()
+        self.strip = load_script("strip_attribution_marker_regression", STRIP)
+        self.repo.commit("a normal change")
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_markers_plus_credit_keeps_markers_drops_credit_check_passes(self):
+        body = (
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Keep the section markers so the next update replaces in place.\n\n"
+            + trailer("Cursor Agent <cursoragent@cursor.com>") + "\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        cleaned = self.strip.clean_cursor_pr_body(body)
+        self.assertIsNotNone(cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_BEGIN -->", cleaned)
+        self.assertIn("<!-- CURSOR_AGENT_PR_BODY_END -->", cleaned)
+        self.assertIn("Keep the section markers so the next update replaces in place.", cleaned)
+        self.assertNotIn("Cursor Agent", cleaned)
+        self.assertNotIn("cursoragent@", cleaned)
+        self.assertEqual(self.repo.check(body=cleaned).returncode, CLEAN)
+
+    def test_credit_outside_the_markers_still_fails(self):
+        body = (
+            "This change is AI-generated.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_BEGIN -->\n"
+            "Human-written summary with no authorship claim.\n"
+            "<!-- CURSOR_AGENT_PR_BODY_END -->\n"
+        )
+        self.assertIsNone(self.strip.clean_cursor_pr_body(body))
+        result = self.repo.check(body=body)
+        self.assertEqual(result.returncode, DIRTY)
+        self.assertIn("AI-generated", result.stdout)
 
 
 class MergeCommitRewriteTest(unittest.TestCase):
