@@ -92,7 +92,7 @@ Changelog section (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
 `Security`) is the front matter. The body is the bullet.
 ```
 
-Unlabelled pull requests pass. That is the org's opt-in rule: an entry is required only when the pull request carries the `changelog` label. Dependabot is exempt. The structure check is not opt-in. It rejects a fragment the compiler cannot read, a duplicate or out-of-order `###` heading, and a release heading that disappeared. It runs on push to the default branch as well as on pull requests, because the bad merge only exists after the second pull request lands.
+By default, unlabelled pull requests pass. That is the org's opt-in rule: an entry is required only when the pull request carries the `changelog` label. Dependabot is exempt. The structure check is not opt-in. It rejects a fragment the compiler cannot read, a duplicate or out-of-order `###` heading, and a release heading that disappeared. It runs on push to the default branch as well as on pull requests, because the bad merge only exists after the second pull request lands.
 
 The release-finalize commit compiles the fragments into the versioned heading `release.yml` already extracts, then deletes them. Notes already under `[Unreleased]` are carried into that version section ahead of the fragment groups, and `[Unreleased]` is left empty. An `-rc.*` tag whose unreleased section is empty already falls back to `## [X.Y.Z]`.
 
@@ -123,6 +123,7 @@ on:
     branches: [master]
 permissions:
   contents: read
+  pull-requests: read
 jobs:
   changelog:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/changelog-fragments.yml@v1
@@ -138,7 +139,42 @@ jobs:
       extra-sections: Docs,Documentation,Dependencies,Tests
 ```
 
-Do not adopt this in a consuming repository until `v1` points at a release that contains it. The connector's opt-out (`no-changelog` on every pull request) is a deliberate exception and is not this workflow.
+Do not adopt new inputs in a consuming repository until `v1` points at a release that contains them. The connector's existing require-by-default policy is supported with `entry-policy: required` and `exemption-label: no-changelog`; it remains a deliberate exception to the default opt-in policy.
+
+Set `enforce-fragments: true` after adoption to reject direct edits to the shared changelog even on an unlabelled pull request. An optional entry remains optional; this setting governs where notes go. Compilation is accepted only when the resulting changelog exactly matches the compiler output from the base changelog and every consumed fragment. An inherited handwritten-only backlog can also be compiled; an empty release is rejected. Dropping a note, changing an archive, or leaving fragments behind fails the gate.
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `entry-policy` | `opt-in` | `required` preserves a repository's existing require-by-default policy. |
+| `exemption-label` | `no-changelog` | Entry exemption when policy is `required`. Dependabot stays exempt. |
+| `enforce-fragments` | `false` | After adoption, disallow ordinary edits to the shared changelog. |
+| `changelog-format` | `versioned` | `calendar` uses dated archives; `rolling` also accepts bare `## Unreleased`. |
+| `allow-initial-release` | `false` | Permit a versioned project with no published release yet. |
+| `preserve-history` | `false` | Validate pending sections without requiring old release bodies to follow current heading rules. |
+
+`preserve-history` never permits a release compile to rewrite an archive. Existing handwritten unreleased notes are retained during adoption and included in the next compile. Correct malformed pending sections once, preserving their prose; do not reformat old releases.
+
+Preview the exact compile without modifying either input:
+
+```sh
+python3 -I /tmp/changelog-fragments.py render --version 1.5.0 --date 2026-10-25
+```
+
+Use the same `--format`, `--extra-sections`, `--allow-initial-release`, and `--preserve-history` options for check, render, and compile. Calendar and rolling formats omit `--version` and archive by `--date`. One compile owns each archive heading; two release-finalize PRs for the same version or day are not independent.
+
+#### Adoption and release protocol
+
+1. Release the shared implementation and verify the published `v1` contains the required inputs and script.
+2. Replace each local gate with the reusable caller, retaining its label policy and exact required status names. If branch protection requires an old job name, keep a small aggregation job with that name which fails unless the reusable workflow succeeded. Preserve label automation and add push validation on the actual default branch.
+3. Add `changelog.d/.gitkeep`, contributor guidance, and `enforce-fragments: true`. Update automated note writers to create unique files. Migrate open PR notes to separate issue-keyed filenames against the adoption base.
+4. Verify independent PRs merge in either order and compile all notes exactly once. Run the repository's existing checks and resolve review findings before declaring readiness.
+5. At release, preview, then compile once from an up-to-date release branch. Review the generated diff and consumed files together. Existing release approval and publication gates still apply.
+
+Fragment filenames must be unique across concurrent PRs, for example `1234-cache-expiry.md`; use distinct slugs when one issue has several PRs. Do not reuse an existing fragment filename. This removes ordinary changelog append collisions; changes to the same source file or competing release compilations can still conflict.
+
+For callers with automatic labeling, run the reusable workflow after that job and propagate labeling failures. The shared gate reads current labels: a label written with `GITHUB_TOKEN` does not create a new `labeled` workflow run. On push or deliberately skipped labeling, allow the shared structure job to run with an explicit dependency condition.
+
+The reusable workflow uses read-only repository and pull-request permissions and fetches its checker from the exact commit of the called workflow. Python runs in isolated mode. Consumers keep configuration and stable status aliases; parsing and compilation remain centralized.
 
 ## Versioning
 
