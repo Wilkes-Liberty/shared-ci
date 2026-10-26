@@ -9,8 +9,9 @@ Scanned: Markdown (``*.md``, ``*.mdc``), prompt files (``*.prompt*``, and
 anything under ``prompts/``, ``agents/``, ``skills/`` or ``rules/``), and
 every file under ``.github/``. Skipped everywhere: source code (``*.py``,
 ``*.sh`` and similar, where "human" is usually an identifier), translation
-files (``*.po``, ``*.pot``) and ``CHANGELOG.md`` (released notes are not
-rewritten).
+files (``*.po``, ``*.pot``), ``CHANGELOG.md`` (released notes are not
+rewritten) and vendored trees (``node_modules/``, ``vendor/``, Drupal core
+and contrib).
 
 Allowed (never flagged): "human-readable", "Human Resources", humanize*,
 identifiers such as ``needs-human``, ``human_*`` and ``HUMAN-CHECKPOINTS``,
@@ -25,6 +26,7 @@ With no paths, scans the files ``git ls-files`` reports.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -55,6 +57,9 @@ ALLOW = re.compile(
 PRAGMA = "operator-terminology: allow"
 PATTERNS = ["*.md", "*.mdc", "*.prompt", "*.prompt.*", ".github/*"]
 DIRS = ("prompts/", "agents/", "skills/", "rules/")
+# Third-party trees a repository may commit: not its own wording.
+VENDORED = ("node_modules/", "vendor/", "web/core/", "web/modules/contrib/",
+            "web/themes/contrib/", "web/profiles/contrib/", "web/libraries/")
 SKIP = (
     "*.po", "*.pot", "CHANGELOG.md",
     "*.py", "*.sh", "*.bash", "*.js", "*.mjs", "*.cjs", "*.ts", "*.php",
@@ -65,6 +70,8 @@ SKIP = (
 def in_scope(path: str) -> bool:
     p = path.replace("\\", "/")
     name = p.rsplit("/", 1)[-1]
+    if any(p.startswith(d) or f"/{d}" in p for d in VENDORED):
+        return False
     if any(fnmatch.fnmatch(name, pat) for pat in SKIP):
         return False
     if p.startswith(".github/") or any(f"/{d}" in f"/{p}" for d in DIRS):
@@ -93,13 +100,14 @@ def main(argv: list[str]) -> int:
     if not paths:
         try:
             out = subprocess.run(
-                ["git", "ls-files", "-z"], capture_output=True, text=True, check=True
+                ["git", "ls-files", "-z"], capture_output=True, check=True
             ).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             # Warn-only means a broken environment is a warning, not a red check.
             print(f"::warning::operator-terminology: could not list files ({exc})")
             return 1 if strict else 0
-        paths = [p for p in out.split("\0") if p]
+        # fsdecode keeps a non-UTF-8 file name readable instead of crashing.
+        paths = [os.fsdecode(p) for p in out.split(b"\0") if p]
     total = 0
     for path in paths:
         if not in_scope(path) or not Path(path).is_file():
@@ -112,7 +120,8 @@ def main(argv: list[str]) -> int:
             total += 1
             level = "error" if strict else "warning"
             msg = escape(f'"{word}": refer to people as operator(s), never human(s)')
-            where = escape(path).replace(",", "%2C").replace(":", "%3A")
+            shown = path.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+            where = escape(shown).replace(",", "%2C").replace(":", "%3A")
             print(f"::{level} file={where},line={line},col={col}::{msg}")
     print(f"operator-terminology: {total} hit(s)" + ("" if strict else " (warn-only)"))
     return 1 if strict and total else 0

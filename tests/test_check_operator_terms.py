@@ -67,7 +67,9 @@ class ScopeTest(unittest.TestCase):
         for path in ("src/app.py", ".github/scripts/strip.py",
                      "skills/x/run.sh", "translations/es.po",
                      ".github/locale/messages.pot", "CHANGELOG.md",
-                     "docs/CHANGELOG.md"):
+                     "docs/CHANGELOG.md", "node_modules/pkg/README.md",
+                     "vendor/acme/skills/x/SKILL.md", "web/core/README.md",
+                     "web/modules/contrib/foo/README.md"):
             with self.subTest(path=path):
                 self.assertFalse(mod.in_scope(path))
 
@@ -103,6 +105,22 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("::warning", r.stdout)
 
+    def test_undecodable_file_name_does_not_lose_the_scan(self):
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True)
+            (Path(d) / "a.md").write_text("a human merges\n")
+            try:
+                with open(os.fsencode(d) + b"/b\xff.md", "w") as f:
+                    f.write("a human merges\n")
+            except OSError:
+                self.skipTest("file system rejects non-UTF-8 names (runs on Linux CI)")
+            subprocess.run(["git", "-C", d, "add", "."], check=True)
+            subprocess.run(["git", "-C", d, "config", "core.quotePath", "false"], check=True)
+            r = subprocess.run([sys.executable, "-I", str(SCRIPT)],
+                               capture_output=True, text=True, cwd=d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("file=a.md,line=1", r.stdout)
+
     def test_file_names_with_spaces(self):
         with tempfile.TemporaryDirectory() as d:
             subprocess.run(["git", "init", "-q", d], check=True)
@@ -123,6 +141,10 @@ class WorkflowTest(WorkflowFixture):
         self.assertIn("workflow_call:", on_block)
         self.assertNotIn("pull_request", on_block)
         self.assertIn("permissions:\n  contents: read\n", source)
+        # A failed or hung checkout must not end the check red either.
+        checkout = source.split("      - name: Check out\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("continue-on-error: true", checkout)
+        self.assertIn("timeout-minutes:", source)
         step = workflow_run("operator-terms.yml", self.STEP)
         self.assertNotIn("--strict", step)
         # The runner's default shell is `bash -e`; the step must turn it off.

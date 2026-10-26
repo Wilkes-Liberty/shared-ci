@@ -28,8 +28,13 @@ jobs:
   operator-terms:
     name: Operator terminology (warn-only)
     runs-on: ubuntu-latest
+    # A hung job would end red; the scan takes seconds.
+    timeout-minutes: 10
     steps:
       - name: Check out
+        # A failed checkout must not turn the check red. The scan then finds
+        # no git tree and reports that as a warning.
+        continue-on-error: true
         uses: actions/checkout@v7
 
       - name: Scan (warn-only)

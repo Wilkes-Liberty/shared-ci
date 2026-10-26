@@ -185,7 +185,8 @@ fails a build: hits, a failed script fetch and a crashed script are all
 `::warning` annotations on a green check.
 
 It skips source code (`*.py`, `*.sh` and similar, where the word is usually
-an identifier), translation files (`*.po`, `*.pot`) and `CHANGELOG.md`. It
+an identifier), translation files (`*.po`, `*.pot`), `CHANGELOG.md`, and
+vendored trees (`node_modules/`, `vendor/`, Drupal core and contrib). It
 allows "human-readable", "Human Resources", humanize\*, identifiers such as
 the `needs-human` label, `human_*` and `HUMAN-CHECKPOINTS`, product copy
 "human editor", the rule statement "human(s)", and anything in inline code.
