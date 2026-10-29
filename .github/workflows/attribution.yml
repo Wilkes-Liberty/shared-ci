@@ -2,7 +2,8 @@ name: Attribution
 
 # Strips AI-attribution trailers and AI author/committer identities from PR
 # commits, strips removable AI credit from the PR body (trailers, Generated
-# with / robot-emoji lines, cursor.com/agents footer, Bugbot CURSOR_SUMMARY
+# with / robot-emoji lines including emphasis wrapping and an orphaned ---
+# above the footer, cursor.com/agents footer, Bugbot CURSOR_SUMMARY
 # blocks) while leaving CURSOR_AGENT_PR_BODY_* section markers in place,
 # then fails the check if any attribution credit remains (commits, title,
 # or body).
@@ -27,7 +28,9 @@ name: Attribution
 #    default to @wilkesliberty.com (operator lock 2026-08-22 / DEV-414).
 # 2. Removable PR-body credit is stripped via gh api PATCH when present:
 #    the trailing cursor.com/agents footer, Bugbot CURSOR_SUMMARY blocks,
-#    and attribution trailer / "Generated with" / robot-emoji lines.
+#    and attribution trailer / "Generated with" / robot-emoji lines,
+#    including `_` / `*` / `**` wrapping the credit line and an orphaned
+#    `---` immediately above it (shared-ci#31).
 #    CURSOR_AGENT_PR_BODY_* HTML comments stay — they are structural.
 #    Removing them made the next Cursor agent description update append
 #    a second copy instead of replacing (DEV-1009 / agency#28). The
@@ -62,6 +65,18 @@ name: Attribution
 # default branch this would be permanently red against pre-existing history,
 # and a trailer cannot reach the default branch except through a PR or an
 # admin bypass.
+#
+# Limitation (shared-ci#31, GitHub platform): ruleset-required runs ignore
+# `types` and only receive the default pull_request activities — opened,
+# synchronize, reopened. A body-only `edited` event re-runs the caller
+# (`Attribution (strip + check)`) and this repository's self run, but it
+# does not start a new required `Attribution` run. That check stays on
+# the last opened/synchronize/reopened result until a new commit is
+# pushed or the pull request is closed and reopened. Re-running the
+# required workflow through the Actions API is a 404: GitHub does not
+# expose that run as a caller-rerunnable workflow. This file cannot
+# change that. Do not work around it by skipping or weakening the
+# required scan.
 #
 # The trust model, which is the part that is easy to get wrong
 # ------------------------------------------------------------
@@ -117,9 +132,11 @@ on:
     # body check can be cleared by fixing the body, instead of needing a
     # no-op push.
     #
-    # These types govern only this repository's own pull requests. Callers
-    # carry their own copy of this trigger, and ruleset-required runs ignore
-    # event filters entirely.
+    # These types govern this repository's own pull requests and, via each
+    # caller's copy of the trigger, the reusable `workflow_call` run. They
+    # do NOT govern the ruleset-required run. GitHub ignores `types` on
+    # ruleset workflows and only fires opened / synchronize / reopened
+    # (see the header limitation above, shared-ci#31).
     types: [opened, synchronize, reopened, edited]
 
 permissions:

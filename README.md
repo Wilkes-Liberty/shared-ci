@@ -28,11 +28,13 @@ keeps authorship credit that way on every pull request:
    then force-with-lease pushes the cleaned tip. A merge of the base
    branch into the feature branch does not disable the rewrite — the
    first-parent chain, including that merge, is replayed. Removable AI
-   credit in the PR body (trailers, "Generated with" / robot-emoji lines,
-   the `cursor.com/agents` footer, Bugbot `CURSOR_SUMMARY` blocks) is
-   removed when present. `CURSOR_AGENT_PR_BODY_*` HTML comments stay so
-   a later Cursor agent description update can replace its section
-   instead of appending a second copy.
+   credit in the PR body (trailers, "Generated with" / robot-emoji lines
+   including `_` / `*` / `**` wrapping the credit line and an orphaned
+   `---` immediately above it, the `cursor.com/agents` footer, Bugbot
+   `CURSOR_SUMMARY` blocks) is removed when present.
+   `CURSOR_AGENT_PR_BODY_*` HTML comments stay so a later Cursor agent
+   description update can replace its section instead of appending a
+   second copy.
 2. **Fails** the check if any attribution credit remains: commit messages,
    commit author/committer identities, PR title, or PR body.
 
