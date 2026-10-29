@@ -1,6 +1,6 @@
-name: Terminology
+name: Agent perspective
 
-# Reference caller for the shared warn-only operator-terminology lint. The
+# Reference caller for the shared warn-only agent-perspective lint. The
 # implementation lives in operator-terms.yml and check-operator-terms.py.
 # This file uses a relative path so the reference exercises the commit under
 # test. Other repositories call the tagged copy:
@@ -9,15 +9,24 @@ name: Terminology
 #     operator-terms:
 #       uses: Wilkes-Liberty/shared-ci/.github/workflows/operator-terms.yml@v1
 #
-# Do not add logic here.
+# Comment events are required for comment coverage. Do not add logic here.
 
 on:
   pull_request:
+    types: [opened, edited, synchronize, reopened]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
   push:
     branches: [master]
 
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
 
 jobs:
   operator-terms:

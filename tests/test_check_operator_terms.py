@@ -1,13 +1,17 @@
-"""Pins for the warn-only operator-terminology lint.
+"""Pins for the warn-only agent-perspective lint.
 
 Failure modes written down first:
   * the lint fails a caller's build (it must only annotate);
   * a fetch or script crash turns the check red;
+  * ``operator`` or ``agent`` is flagged — both words are correct;
   * keep cases (human-readable, Human Resources, the needs-human label,
     HUMAN-CHECKPOINTS, .po files, "human editor" product copy, inline
-    ignore marker) get flagged, so people learn to ignore the annotations;
+    ignore marker, fenced code, file paths, the agent-state block)
+    get flagged, so people learn to ignore the annotations;
   * the rule statement "human(s)" and frozen release notes flag themselves;
-  * code identifiers in scripts get flagged as prose.
+  * code identifiers in scripts get flagged as prose;
+  * a technical mention of a product name ("Copilot configuration") warns;
+  * PR title, body and comment surfaces are not scanned.
 """
 
 import importlib.util
@@ -15,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -27,9 +32,48 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+def words(text: str) -> list[str]:
+    return [word for _, _, word in mod.hits(text)]
+
+
 class HitsTest(unittest.TestCase):
     def test_flags_people(self):
         self.assertEqual(len(mod.hits("A human merges.\nHumans deploy.")), 2)
+
+    def test_operator_and_agent_pass(self):
+        text = "\n".join([
+            "An operator merges.",
+            "Operators review the diff.",
+            "An agent opened this pull request.",
+            "Agents may comment; the narrative is still for the operator.",
+        ])
+        self.assertEqual(mod.hits(text), [])
+
+    def test_flags_bot_perspective_examples(self):
+        cases = [
+            ("Cursor did the refactor.", "Cursor did"),
+            ("Copilot will update the tests.", "Copilot will"),
+            ("Ship it as an AI reviewer.", "as an AI"),
+            ("I am Claude and I reviewed this.", "I am Claude"),
+            ("Bugbot here with a pass.", "Bugbot here"),
+            ("DO NOT MERGE until the token arrives.", "DO NOT MERGE"),
+            ("AGENTS: skip the changelog check.", "AGENTS:"),
+            ("Please ask the user before merging.", "ask the user"),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertIn(expected, words(text), words(text))
+
+    def test_technical_product_name_is_not_an_actor(self):
+        text = "\n".join([
+            "This pull request updates the Copilot configuration.",
+            "Pin the Cursor workflow to v1.",
+            "Claude review is documented in the vault.",
+        ])
+        self.assertEqual(mod.hits(text), [])
+
+    def test_lowercase_do_not_merge_is_prose(self):
+        self.assertEqual(mod.hits("Please do not merge until review finishes."), [])
 
     def test_allowlist(self):
         text = "\n".join([
@@ -42,7 +86,9 @@ class HitsTest(unittest.TestCase):
             "The Human Action Model.",
             "a human merges <!-- operator-terminology: allow -->",
             "a human merges  # operator-terminology: allow",
+            "Cursor did this  # agent-perspective: allow",
             "Use `a human` in code spans.",
+            "Use `Cursor did this` in code spans.",
             "{{ $value | humanize }}",
             "The human editor reviews the draft in the CMS.",
             "Refer to people as operator(s), never human(s).",
@@ -52,6 +98,44 @@ class HitsTest(unittest.TestCase):
     def test_allowlist_does_not_swallow_neighbours(self):
         found = mod.hits("Keep it human-readable; a human merges it.")
         self.assertEqual([w for _, _, w in found], ["human"])
+
+    def test_skips_inline_code_and_fenced_blocks(self):
+        text = "\n".join([
+            "See `I am Claude` in the prompt fixture.",
+            "```",
+            "Cursor did the refactor.",
+            "DO NOT MERGE",
+            "```",
+            "A human merges.",
+        ])
+        self.assertEqual(words(text), ["human"])
+
+    def test_skips_tilde_fences_and_file_paths(self):
+        text = "\n".join([
+            "~~~markdown",
+            "as an AI",
+            "~~~",
+            "See AGENTS.md and .github/workflows/copilot.yml for setup.",
+            "https://example.test/I-am-Claude",
+            "ask the user before merging.",
+        ])
+        self.assertEqual(words(text), ["ask the user"])
+
+    def test_skips_agent_state_metadata_block(self):
+        text = "\n".join([
+            "Ready for review.",
+            "<!-- agent-state",
+            "do-not-merge: true",
+            "note: DO NOT MERGE",
+            "actor: Cursor did this",
+            "-->",
+            "Cursor did the extra commit.",
+        ])
+        self.assertEqual(words(text), ["Cursor did"])
+
+    def test_other_html_comments_are_still_scanned(self):
+        text = "<!-- leftover: DO NOT MERGE this narrative -->"
+        self.assertIn("DO NOT MERGE", words(text))
 
 
 class ScopeTest(unittest.TestCase):
@@ -97,6 +181,44 @@ class CliTest(unittest.TestCase):
 
     def test_clean_passes_strict(self):
         self.assertEqual(self.run_on("an operator merges\n", "--strict").returncode, 0)
+        self.assertEqual(self.run_on("an agent opened this\n", "--strict").returncode, 0)
+
+    def test_text_surface_warns_without_a_file(self):
+        r = subprocess.run(
+            [sys.executable, "-I", str(SCRIPT), "--text", "I am Claude"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("::warning::", r.stdout)
+        self.assertIn("I am Claude", r.stdout)
+
+    def test_title_and_comment_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            title = Path(d) / "title.txt"
+            comment = Path(d) / "comment.txt"
+            title.write_text("Cursor did the work\n", encoding="utf-8")
+            comment.write_text("ask the user to merge\n", encoding="utf-8")
+            r = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT),
+                 "--title-file", str(title), "--comment-file", str(comment)],
+                capture_output=True, text=True,
+            )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("title:", r.stdout)
+        self.assertIn("comment:", r.stdout)
+        self.assertIn("2 hit(s)", r.stdout)
+
+    def test_job_summary_lists_hits(self):
+        with tempfile.TemporaryDirectory() as d:
+            summary = Path(d) / "summary.md"
+            env = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary))
+            r = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), "--text", "DO NOT MERGE"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("Agent perspective", summary.read_text())
+            self.assertIn("DO NOT MERGE", summary.read_text())
 
     def test_outside_a_git_tree_still_exits_zero(self):
         with tempfile.TemporaryDirectory() as d:
@@ -116,8 +238,9 @@ class CliTest(unittest.TestCase):
                 self.skipTest("file system rejects non-UTF-8 names (runs on Linux CI)")
             subprocess.run(["git", "-C", d, "add", "."], check=True)
             subprocess.run(["git", "-C", d, "config", "core.quotePath", "false"], check=True)
+            env = dict(os.environ, GITHUB_STEP_SUMMARY=str(Path(d) / "summary.md"))
             r = subprocess.run([sys.executable, "-I", str(SCRIPT)],
-                               capture_output=True, text=True, cwd=d)
+                               capture_output=True, text=True, cwd=d, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("file=a.md,line=1", r.stdout)
 
@@ -131,6 +254,86 @@ class CliTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("file=my notes.md,line=1", r.stdout)
 
+    def test_this_repository_is_clean(self):
+        r = subprocess.run(
+            [sys.executable, "-I", str(SCRIPT), "--strict"],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("0 hit(s)", r.stdout)
+
+
+class GitHubSurfaceTest(unittest.TestCase):
+    def run_github(self, handler: str, extra_env: dict | None = None):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env python3\n" + handler)
+            gh.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = str(root) + os.pathsep + env["PATH"]
+            env["GITHUB_REPOSITORY"] = "example/project"
+            env["ISSUE_NUMBER"] = "12"
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            if extra_env:
+                env.update(extra_env)
+            return subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), "--github"],
+                capture_output=True, text=True, cwd=d, env=env,
+            )
+
+    def test_scans_title_body_and_comments(self):
+        handler = textwrap.dedent("""\
+            import json, sys
+            path = sys.argv[-1]
+            if path.endswith("/pulls/12"):
+                print(json.dumps({"title": "Cursor did the work", "body": "Ready."}))
+            elif path.endswith("/issues/12/comments"):
+                print(json.dumps([{"id": 1, "body": "ask the user to merge"}]))
+            elif path.endswith("/pulls/12/comments"):
+                print(json.dumps([{"id": 2, "body": "I am Claude"}]))
+            elif path.endswith("/pulls/12/reviews"):
+                print(json.dumps([{"id": 3, "body": "DO NOT MERGE"}]))
+            else:
+                raise SystemExit(1)
+        """)
+        r = self.run_github(handler)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PR title:", r.stdout)
+        self.assertIn("issue comment 1:", r.stdout)
+        self.assertIn("review comment 2:", r.stdout)
+        self.assertIn("review 3:", r.stdout)
+        self.assertIn("4 hit(s)", r.stdout)
+
+    def test_issue_without_a_pull_request(self):
+        handler = textwrap.dedent("""\
+            import json, sys
+            path = sys.argv[-1]
+            if "/pulls/12" in path:
+                raise SystemExit(1)
+            if path.endswith("/issues/12"):
+                print(json.dumps({"title": "Operators only", "body": "as an AI"}))
+            elif path.endswith("/issues/12/comments"):
+                print(json.dumps([]))
+            else:
+                raise SystemExit(1)
+        """)
+        r = self.run_github(handler)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("issue body:", r.stdout)
+        self.assertIn("1 hit(s)", r.stdout)
+
+    def test_failed_github_read_warns_and_passes(self):
+        r = self.run_github("import sys\nraise SystemExit(1)\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("::warning::", r.stdout)
+
+    def test_missing_issue_number_warns_and_passes(self):
+        r = self.run_github("import sys\nraise SystemExit(1)\n",
+                            extra_env={"ISSUE_NUMBER": ""})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ISSUE_NUMBER is missing", r.stdout)
+
 
 class WorkflowTest(WorkflowFixture):
     STEP = "Scan (warn-only)"
@@ -140,7 +343,10 @@ class WorkflowTest(WorkflowFixture):
         on_block = source.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertIn("workflow_call:", on_block)
         self.assertNotIn("pull_request", on_block)
-        self.assertIn("permissions:\n  contents: read\n", source)
+        self.assertIn("contents: read", source)
+        self.assertIn("pull-requests: read", source)
+        self.assertIn("issues: read", source)
+        self.assertIn("name: Agent perspective (warn-only)", source)
         # A failed or hung checkout must not end the check red either.
         checkout = source.split("      - name: Check out\n", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("continue-on-error: true", checkout)
@@ -149,6 +355,14 @@ class WorkflowTest(WorkflowFixture):
         self.assertNotIn("--strict", step)
         # The runner's default shell is `bash -e`; the step must turn it off.
         self.assertTrue(step.lstrip().splitlines()[2].startswith("set +e"), step)
+
+    def test_reference_caller_covers_comment_events(self):
+        source = (ROOT / ".github/workflows/terminology.yml").read_text()
+        self.assertIn("issue_comment:", source)
+        self.assertIn("pull_request_review_comment:", source)
+        self.assertIn("pull_request_review:", source)
+        self.assertIn("edited", source)
+        self.assertIn("./.github/workflows/operator-terms.yml", source)
 
     def scan(self):
         subprocess.run(["git", "init", "-q", str(self.work)], check=True)

@@ -178,48 +178,76 @@ For callers with automatic labeling, run the reusable workflow after that job an
 
 The reusable workflow uses read-only repository and pull-request permissions and fetches its checker from the exact commit of the called workflow. Python runs in isolated mode. Consumers keep configuration and stable status aliases; parsing and compilation remain centralized.
 
-### operator-terms.yml — warn-only terminology lint
+### operator-terms.yml — warn-only agent-perspective lint
 
-Standing rule: refer to people as operator(s), never human(s). This workflow
-annotates "human(s)" in Markdown, prompt files, files under `prompts/`,
-`agents/`, `skills/` and `rules/`, and everything under `.github/`. It never
-fails a build: hits, a failed script fetch and a crashed script are all
-`::warning` annotations on a green check.
+Standing rule (DEV-1217): pull request titles, bodies and comments are written
+for a developer. People are operator(s). AI bots are agent(s). Both words are
+correct and are never flagged.
 
-It skips source code (`*.py`, `*.sh` and similar, where the word is usually
-an identifier), translation files (`*.po`, `*.pot`), `CHANGELOG.md`, and
-vendored trees (`node_modules/`, `vendor/`, Drupal core and contrib). It
+The workflow annotates bot-perspective language: a bot writing about itself or
+other bots as if they were the reader, narration written for other agents
+instead of the operator,
+product names used as actors (`Cursor did`, `Copilot will`, `Bugbot here`),
+self-identity (`as an AI`, `I am Claude`), ALL-CAPS directives in the prose
+(`DO NOT MERGE`, `AGENTS: …`), and calling people `human(s)` or `the user` in
+agent-to-agent tone where `operator` is meant. It never fails a build: hits, a
+failed script fetch and a crashed script are all `::warning` annotations on a
+green check, plus a job summary.
+
+The same cheap file scan as before still runs: Markdown, prompt files, files
+under `prompts/`, `agents/`, `skills/` and `rules/`, and everything under
+`.github/`. It skips source code (`*.py`, `*.sh` and similar, where the word is
+usually an identifier), translation files (`*.po`, `*.pot`), `CHANGELOG.md`,
+and vendored trees (`node_modules/`, `vendor/`, Drupal core and contrib). It
 allows "human-readable", "Human Resources", humanize\*, identifiers such as
 the `needs-human` label, `human_*` and `HUMAN-CHECKPOINTS`, product copy
-"human editor", the rule statement "human(s)", and anything in inline code.
-Mark any other keep case, such as a third-party quote, with an inline comment
-on the same line:
+"human editor", the rule statement "human(s)", inline code, fenced code, file
+paths, URLs, and the reserved `<!-- agent-state … -->` metadata block
+(DEV-1217 R2). A technical mention of a product name (a pull request that
+changes Copilot config) is not an actor. Mark any other keep case with an
+inline comment on the same line:
 
 ```markdown
 "Written by a human, for humans." <!-- operator-terminology: allow -->
 ```
 
-In YAML, use `# operator-terminology: allow`. Run it locally from a
-repository root with `python3 -I check-operator-terms.py`; `--strict` turns
-hits into errors and a non-zero exit, for a later switch to enforcement.
+`# agent-perspective: allow` is accepted too. In YAML, use a `#` comment.
+Run it locally from a repository root with
+`python3 -I check-operator-terms.py`; `--strict` turns hits into errors and a
+non-zero exit, for a later switch to enforcement. `--github` reads the current
+issue or pull request title, body, comments and reviews through `gh api`.
 
-This repository's reference caller is `.github/workflows/terminology.yml`.
-Other repositories pin the tag:
+The displayed job name is **Agent perspective (warn-only)**. The workflow
+path and the job id `operator-terms` stay the same so existing callers keep
+working. This repository's reference caller is
+`.github/workflows/terminology.yml`. Other repositories pin the tag and, for
+comment coverage, trigger on comment events:
 
 ```yaml
-# .github/workflows/terminology.yml
-name: Terminology
+# .github/workflows/agent-perspective.yml
+name: Agent perspective
 on:
   pull_request:
+    types: [opened, edited, synchronize, reopened]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
 jobs:
   operator-terms:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/operator-terms.yml@v1
 ```
 
-Do not adopt it in a consuming repository until `v1` points at a release that
-contains it.
+A caller pinned at `@v1` runs today's check until the alias is moved. Do not
+adopt new behaviour in a consuming repository until `v1` points at a release
+that contains it. Comment-event triggers are needed for comment coverage;
+`pull_request` alone still scans the title, body and files.
 
 ## Versioning
 

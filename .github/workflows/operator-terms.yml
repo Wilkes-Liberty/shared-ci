@@ -1,16 +1,26 @@
-name: Operator terminology
+name: Agent perspective
 
-# Warn-only lint: flags "human(s)" used for people in Markdown, prompts and
-# .github/** files. Standing rule: refer to people as operator(s), never
-# human(s). Annotations only: every outcome of this job, including a failed
-# fetch or a crashed script, is a green check with ::warning annotations.
-# The allowlist and scope live in check-operator-terms.py; a single line can
-# opt out with an `operator-terminology: allow` comment.
+# Warn-only lint: flags bot-perspective language in pull request titles,
+# bodies, issue/review comments, and (cheaply) the same Markdown, prompt
+# and .github/** files as before. People are operator(s); AI bots are
+# agent(s). Both words are correct. Annotations only: every outcome of
+# this job, including a failed fetch or a crashed script, is a green
+# check with ::warning annotations. The allowlist and scope live in
+# check-operator-terms.py; a single line can opt out with an
+# `operator-terminology: allow` comment (or `agent-perspective: allow`).
+#
+# The job id stays `operator-terms` so existing callers keep working.
+# The displayed job name is "Agent perspective (warn-only)".
 #
 # Callers:
 #   jobs:
 #     operator-terms:
 #       uses: Wilkes-Liberty/shared-ci/.github/workflows/operator-terms.yml@v1
+#
+# Comment-event coverage needs the caller to trigger on issue_comment,
+# pull_request_review_comment and pull_request_review as well as
+# pull_request (opened / edited / synchronize / reopened). Callers that
+# only fire on pull_request still get title, body and file scanning.
 #
 # Trust: the script is fetched from Wilkes-Liberty/shared-ci at
 # job.workflow_sha, the commit this workflow file was resolved to, never from
@@ -23,10 +33,12 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
 
 jobs:
   operator-terms:
-    name: Operator terminology (warn-only)
+    name: Agent perspective (warn-only)
     runs-on: ubuntu-latest
     # A hung job would end red; the scan takes seconds.
     timeout-minutes: 10
@@ -42,6 +54,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REPO: Wilkes-Liberty/shared-ci
           SCRIPTS_REF: ${{ job.workflow_sha }}
+          ISSUE_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           # The runner's default shell is `bash -e -o pipefail`. Turn -e off:
           # warn-only means no shell error may end this step red.
@@ -49,15 +62,19 @@ jobs:
           script="$RUNNER_TEMP/trusted/check-operator-terms.py"
           mkdir -p "$RUNNER_TEMP/trusted"
           if [ -z "${SCRIPTS_REF}" ]; then
-            echo "::warning::operator-terminology: job.workflow_sha is empty; scan skipped."
+            echo "::warning::agent-perspective: job.workflow_sha is empty; scan skipped."
             exit 0
           fi
           if ! gh api "repos/${SOURCE_REPO:-Wilkes-Liberty/shared-ci}/contents/.github/scripts/check-operator-terms.py?ref=${SCRIPTS_REF}" \
               -H "Accept: application/vnd.github.raw" > "$script" || ! [ -s "$script" ]; then
-            echo "::warning::operator-terminology: could not fetch the lint script; scan skipped."
+            echo "::warning::agent-perspective: could not fetch the lint script; scan skipped."
             exit 0
           fi
-          if ! python3 -I "$script"; then
-            echo "::warning::operator-terminology: the lint script exited non-zero; treated as a warning."
+          args=()
+          if [ -n "${ISSUE_NUMBER:-}" ]; then
+            args+=(--github)
+          fi
+          if ! python3 -I "$script" "${args[@]}"; then
+            echo "::warning::agent-perspective: the lint script exited non-zero; treated as a warning."
           fi
           exit 0
