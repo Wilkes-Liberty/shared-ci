@@ -4,6 +4,25 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-29
+
+### Changed
+- **Agent-perspective lint (warn-only).** `operator-terms.yml` and
+  `check-operator-terms.py` now flag bot-perspective language in pull request
+  titles, bodies, and PR, issue and review comments. `operator` and `agent`
+  stay allowed. File scanning of Markdown, prompts and `.github/**` remains.
+  The displayed job name is "Agent perspective (warn-only)"; the workflow
+  path and job id stay the same so existing callers keep working. (DEV-1217)
+
+### Fixed
+- **Attribution strip now removes emphasis-wrapped credit footers and the
+  orphaned `---` above them.** Hosted agents wrap the credit line in
+  `_…_`; strip's `^\s*` anchor missed that while the check still flagged
+  it, so vault PRs stayed red after a cleanup that could have worked
+  (shared-ci#31). The ruleset-required run still does not receive
+  `pull_request: edited`; that GitHub platform limit is documented in the
+  workflow header. (shared-ci#31)
+
 ## [1.6.0] - 2026-10-27
 
 ### Added
