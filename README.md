@@ -9,6 +9,20 @@ no deployment configuration, no infrastructure detail. If a change would add
 anything beyond a workflow, its scripts, or their tests, it belongs somewhere
 else.
 
+## Private build runners
+
+Private caller repositories may set `CI_RUNS_ON` to a JSON runner-label array,
+for example `["self-hosted", "Linux", "X64", "ci-linux"]`. Attribution,
+changelog and agent-perspective checks use that selection. The registered build
+runners must be available to the caller repository and provide Bash, Git,
+Python 3, GitHub CLI and the actions' Node.js runtime dependencies. Use a fresh
+job environment for every job. Public repositories and private repositories
+without the variable retain `ubuntu-latest`.
+
+This changes job placement only. Check names, required-workflow enforcement,
+script provenance, permissions and failure behavior remain unchanged. Consumers
+pinned to `@v1` gain the selection after a release updates that alias.
+
 ## Workflows
 
 ### attribution.yml — check `No AI attribution`

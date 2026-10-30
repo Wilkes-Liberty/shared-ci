@@ -112,7 +112,7 @@ jobs:
     # request when the label is absent: a skipped required check blocks the
     # pull request, so the label guard is on the steps, not the job.
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event.repository.private && vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     steps:
       - name: Decide whether a fragment is required
         id: policy
@@ -206,7 +206,7 @@ jobs:
 
   structure:
     name: Changelog structure
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event.repository.private && vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     steps:
       - name: Check out
         uses: actions/checkout@v7

@@ -39,7 +39,7 @@ permissions:
 jobs:
   operator-terms:
     name: Agent perspective (warn-only)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event.repository.private && vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     # A hung job would end red; the scan takes seconds.
     timeout-minutes: 10
     steps:
