@@ -13,7 +13,7 @@ else.
 
 Private caller repositories may set `CI_RUNS_ON` to a JSON runner-label array,
 for example `["self-hosted", "Linux", "X64", "ci-linux"]`. Attribution,
-changelog and agent-perspective checks use that selection. The registered build
+changelog, agent-perspective and PR-readiness checks use that selection. The registered build
 runners must be available to the caller repository and provide Bash, Git,
 Python 3, GitHub CLI and the actions' Node.js runtime dependencies. Use a fresh
 job environment for every job. Public repositories and private repositories
@@ -262,6 +262,51 @@ A caller pinned at `@v1` runs today's check until the alias is moved. Do not
 adopt new behaviour in a consuming repository until `v1` points at a release
 that contains it. Comment-event triggers are needed for comment coverage;
 `pull_request` alone still scans the title, body and files.
+
+### pr-readiness.yml — inspect check suites, not only check runs
+
+Review and review-comment events from Copilot can create a completed
+`action_required` check suite before any jobs start. That suite has no
+check-run entry, so a check-run-only view looks successful or expected-skip
+while GitHub still reports an unstable merge state.
+
+`check-pr-readiness.py` reads check runs, check suites and workflow runs for
+the pull request head. A pre-job `action_required` suite is a failure of this
+diagnostic, and the output names the review-triggered run that needs operator
+attention. Success and an expected skipped assistant job stay green; an
+actual failed job stays red.
+
+This is diagnostics, not an approval gate. The job does not rerun or approve
+workflows. An operator rerun of the named run keeps existing invocation
+guards: lint jobs run, and an explicitly invoked assistant job stays skipped
+when no invocation is present. Untrusted-event permissions stay read-only;
+do not grant this workflow permission to authorize arbitrary workflow code.
+
+Run it locally with `python3 -I check-pr-readiness.py --pr 41`. This
+repository's reference caller is `.github/workflows/readiness.yml`. Other
+repositories pin the tag:
+
+```yaml
+# .github/workflows/readiness.yml
+name: PR readiness
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  check_suite:
+    types: [completed]
+permissions:
+  contents: read
+  checks: read
+  actions: read
+  pull-requests: read
+jobs:
+  readiness:
+    uses: Wilkes-Liberty/shared-ci/.github/workflows/pr-readiness.yml@v1
+```
+
+The reusable workflow ignores `check_suite` completions other than
+`action_required`, so this job does not loop on its own result. Callers
+pinned at `@v1` pick the diagnostic up after that alias moves.
 
 ## Versioning
 

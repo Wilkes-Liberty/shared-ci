@@ -1,0 +1,73 @@
+name: PR readiness
+
+# Inspects check-suite conclusions as well as check runs so a completed
+# action_required suite with no check-run entry is not reported as green
+# or expected-skip (shared-ci#41). Review and review-comment events from
+# Copilot create that shape before jobs start.
+#
+# This job is diagnostics. It names the review-triggered run that needs
+# operator attention. It does not approve or rerun workflows, and it does
+# not change untrusted-event permissions or invocation guards on other
+# jobs: lint still runs; an explicitly invoked assistant job stays skipped
+# when no invocation is present.
+#
+# Trust: the script is fetched from Wilkes-Liberty/shared-ci at
+# job.workflow_sha, never from the caller's tree, and runs with
+# `python3 -I`. This repository's reference caller is readiness.yml.
+#
+# Callers:
+#   jobs:
+#     readiness:
+#       uses: Wilkes-Liberty/shared-ci/.github/workflows/pr-readiness.yml@v1
+#
+# Optional on the caller: `check_suite` types: [completed] with
+#   if: github.event_name != 'check_suite' || github.event.check_suite.conclusion == 'action_required'
+# so a Copilot-gated suite re-evaluates without looping on this job's own
+# completion. Do not add write permissions to "approve and run" that suite.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  checks: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  readiness:
+    name: PR readiness
+    if: |
+      github.event_name != 'check_suite' ||
+      github.event.check_suite.conclusion == 'action_required'
+    runs-on: ${{ fromJSON(github.event.repository.private && vars.CI_RUNS_ON || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - name: Fetch the trusted script
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: Wilkes-Liberty/shared-ci
+          SCRIPTS_REF: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SCRIPTS_REF}" ]; then
+            echo "::error::job.workflow_sha is empty; cannot locate the trusted script."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/trusted"
+          gh api "repos/${SOURCE_REPO}/contents/.github/scripts/check-pr-readiness.py?ref=${SCRIPTS_REF}" \
+            -H "Accept: application/vnd.github.raw" \
+            > "$RUNNER_TEMP/trusted/check-pr-readiness.py"
+          if ! [ -s "$RUNNER_TEMP/trusted/check-pr-readiness.py" ]; then
+            echo "::error::could not fetch check-pr-readiness.py from ${SOURCE_REPO}@${SCRIPTS_REF}."
+            exit 1
+          fi
+
+      - name: Inspect check suites and check runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.check_suite.head_sha }}
+          IGNORE_CHECK: PR readiness
+        run: python3 -I "$RUNNER_TEMP/trusted/check-pr-readiness.py"
