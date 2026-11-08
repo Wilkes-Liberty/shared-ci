@@ -187,6 +187,7 @@ jobs:
         if: steps.policy.outputs.required == 'true'
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           CHANGELOG: ${{ inputs.changelog-path }}
           FRAGMENTS: ${{ inputs.fragments-dir }}
           EXTRA: ${{ inputs.extra-sections }}
@@ -199,6 +200,7 @@ jobs:
             --changelog "$CHANGELOG" --fragments "$FRAGMENTS"
             --extra-sections "$EXTRA" --format "$FORMAT"
             --require-entry --base "$BASE")
+          if [ -n "$PR_HEAD" ]; then args+=(--pr-head "$PR_HEAD"); fi
           if [ "$INITIAL" = true ]; then args+=(--allow-initial-release); fi
           if [ "$PRESERVE" = true ]; then args+=(--preserve-history); fi
           "${args[@]}"
@@ -236,6 +238,7 @@ jobs:
       - name: Validate fragments and the changelog
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           ENFORCE: ${{ inputs.enforce-fragments }}
           PUSH_BEFORE: ${{ github.event.before }}
           CHANGELOG: ${{ inputs.changelog-path }}
@@ -256,8 +259,11 @@ jobs:
           if [ "$INITIAL" = true ]; then args+=(--allow-initial-release); fi
           if [ "$PRESERVE" = true ]; then args+=(--preserve-history); fi
           # `before` is all zeros on a branch's first push; nothing to diff.
+          # PR_HEAD lets the checker prefer the merge commit's first parent
+          # when the event base SHA has lagged behind that merge.
           if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
             args+=(--base "$BASE")
+            if [ -n "$PR_HEAD" ]; then args+=(--pr-head "$PR_HEAD"); fi
             if [ "$ENFORCE" = true ] && [ -n "$PR_BASE" ]; then args+=(--enforce-fragments); fi
           fi
           "${args[@]}"

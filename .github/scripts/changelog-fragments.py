@@ -126,6 +126,46 @@ def git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def rev_parse(cwd: Path, rev: str) -> str | None:
+    result = git(["rev-parse", "--verify", f"{rev}^{{commit}}"], cwd)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def commit_parents(cwd: Path, rev: str) -> list[str]:
+    result = git(["rev-list", "--parents", "-n", "1", rev], cwd)
+    if result.returncode != 0:
+        return []
+    parts = result.stdout.split()
+    return parts[1:]
+
+
+def comparison_base(
+    cwd: Path, base: str, head: str, pr_head: str | None
+) -> str:
+    """Prefer the first parent of a verified GitHub merge commit.
+
+    A pull_request event can keep an older base SHA after GitHub regenerates
+    ``refs/pull/N/merge`` against a newer target. Diffing that merge tree
+    against the stale event base counts files from unrelated already-merged
+    work. When ``head`` is that two-parent merge and the second parent is
+    this pull request's tip, the first parent is the target actually merged
+    into. A merge of the target *into* the pull request is not that shape:
+    its second parent is the target, not the PR tip, so ``--base`` stands.
+    """
+    if not pr_head:
+        return base
+    resolved_head = rev_parse(cwd, head)
+    resolved_pr = rev_parse(cwd, pr_head)
+    if resolved_head is None or resolved_pr is None:
+        return base
+    parents = commit_parents(cwd, resolved_head)
+    if len(parents) != 2 or parents[1] != resolved_pr:
+        return base
+    return parents[0]
+
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -702,18 +742,19 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     if args.base:
         cwd = Path.cwd()
-        previous = show_file(cwd, args.base, args.changelog)
+        head = args.head or "HEAD"
+        base = comparison_base(cwd, args.base, head, args.pr_head)
+        previous = show_file(cwd, base, args.changelog)
         if previous is None:
             print(
-                f"note: {args.changelog} is not on {args.base}; "
+                f"note: {args.changelog} is not on {base}; "
                 "skipping the deleted-release check"
             )
         else:
-            errors.extend(deleted_heading_errors(previous, text, args.base))
+            errors.extend(deleted_heading_errors(previous, text, base))
         if args.require_entry or args.enforce_fragments:
-            head = args.head or "HEAD"
             errors.extend(
-                entry_errors(cwd, args.base, head, args.changelog, args.fragments,
+                entry_errors(cwd, base, head, args.changelog, args.fragments,
                              allowed, args.format, args.require_entry, args.allow_initial_release, args.preserve_history)
             )
     elif args.require_entry or args.enforce_fragments:
@@ -807,6 +848,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="git rev whose release headings must still be present",
     )
     check.add_argument("--head", default="HEAD")
+    check.add_argument(
+        "--pr-head",
+        help="PR tip; rebind --base to the first parent when --head is that tip's merge commit",
+    )
     check.add_argument(
         "--require-entry",
         action="store_true",
