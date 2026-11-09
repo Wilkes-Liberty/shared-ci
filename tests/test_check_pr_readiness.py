@@ -189,6 +189,48 @@ class ClassifyTests(unittest.TestCase):
         )
         self.assertEqual(verdict.kind, "action_required", verdict)
 
+    def test_requested_and_pending_are_unfinished_not_approval(self):
+        for status in ("pending", "requested"):
+            verdict = mod.classify(
+                [],
+                [suite(2, conclusion=None, status=status, check_runs=0)],
+                [workflow(8, 2, "pull_request", conclusion=None, status=status, name="CI")],
+            )
+            self.assertEqual(verdict.kind, "pending", verdict)
+            self.assertFalse(any(item.kind == "action_required" for item in verdict.findings))
+            self.assertNotIn("completed action_required", mod.format_verdict(verdict))
+
+    def test_nonempty_in_progress_suite_is_not_success(self):
+        """Successful check runs do not hide a suite that is still running."""
+        verdict = mod.classify(
+            [check_run("lint", "success", id=1, suite_id=1)],
+            [suite(1, conclusion=None, status="in_progress", check_runs=1)],
+            [workflow(6, 1, status="in_progress", conclusion=None, name="CI")],
+        )
+        self.assertEqual(verdict.kind, "pending", verdict)
+
+    def test_nonempty_failed_suite_is_not_success(self):
+        """Successful check runs do not hide a failed suite."""
+        verdict = mod.classify(
+            [check_run("lint", "success", id=1, suite_id=1)],
+            [suite(1, "failure", status="completed", check_runs=1)],
+            [workflow(6, 1, "pull_request", "failure", name="CI")],
+        )
+        self.assertEqual(verdict.kind, "failure", verdict)
+        self.assertTrue(any(item.name == "CI" for item in verdict.findings))
+
+    def test_ignored_check_does_not_make_its_suite_a_failure(self):
+        verdict = mod.classify(
+            [
+                check_run("lint", "success", id=1, suite_id=1),
+                check_run("readiness / PR readiness", "failure", id=2, suite_id=1),
+            ],
+            [suite(1, "failure", status="completed", check_runs=2)],
+            [workflow(6, 1, "pull_request", "failure", name="CI")],
+            ignore_names=frozenset({"PR readiness"}),
+        )
+        self.assertEqual(verdict.kind, "success", verdict)
+
     def test_ignore_own_check_name(self):
         verdict = mod.classify(
             [

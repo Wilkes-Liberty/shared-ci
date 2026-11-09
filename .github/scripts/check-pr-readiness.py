@@ -34,8 +34,11 @@ BLOCKING_CONCLUSIONS = frozenset(
 )
 OK_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
 ATTENTION_CONCLUSIONS = frozenset({"action_required"})
-WAITING_STATUSES = frozenset({"waiting", "waiting_for_review", "requested", "pending"})
-INCOMPLETE_STATUSES = frozenset({"queued", "in_progress"}) | WAITING_STATUSES
+# `waiting` is an approval hold. `pending` and `requested` are ordinary
+# unfinished states: a concurrency slot, a runner, or a suite that has
+# been requested and has not started.
+WAITING_STATUSES = frozenset({"waiting", "waiting_for_review"})
+INCOMPLETE_STATUSES = frozenset({"queued", "in_progress", "requested", "pending"}) | WAITING_STATUSES
 
 RERUN_NOTE = (
     "An operator rerun keeps existing invocation guards: lint jobs run, "
@@ -222,6 +225,13 @@ def classify(
         elif conclusion not in OK_CONCLUSIONS:
             add(Finding("failure", name, f"conclusion={conclusion or 'missing'}", url, "", run_id), "check-run")
 
+    def unfinished(run: dict) -> bool:
+        run_status = _as_str(run.get("status"))
+        return run_status in INCOMPLETE_STATUSES or run_status not in {"", "completed"}
+
+    def blocking(run: dict) -> bool:
+        return _as_str(run.get("conclusion")) in BLOCKING_CONCLUSIONS and not unfinished(run)
+
     for suite in check_suites:
         if not isinstance(suite, dict):
             continue
@@ -247,19 +257,31 @@ def classify(
         who = f", actor={actor}" if actor else ""
         event_note = f", event={event}" if event else ""
         detail = f"conclusion={conclusion or 'none'}, {empty_note}{event_note}{who}"
+        members = [
+            run for run in suite_runs
+            if suite_id is not None and check_suite_id(run) == suite_id
+        ]
+        visible_members = [run for run in members if not matches_ignore(run, ignore_names)]
+        ignored_members = [run for run in members if matches_ignore(run, ignore_names)]
 
         if conclusion in ATTENTION_CONCLUSIONS or status in WAITING_STATUSES:
-            if empty:
+            if empty and conclusion in ATTENTION_CONCLUSIONS:
                 detail = (
                     "completed action_required suite with no check-run entry"
                     f"{event_note}{who}"
                 )
             add(Finding("action_required", name, detail, url, event, run_id), "workflow-run")
             continue
-        if empty and (status in INCOMPLETE_STATUSES or status not in {"", "completed"}):
-            add(Finding("pending", name, f"status={status or 'unknown'}{event_note}", url, event, run_id), "workflow-run")
+        # A nonempty suite can still be the only signal: the check-run list
+        # may be a successful snapshot while the suite is in progress or
+        # failed. Skip that signal when an ignored readiness check is the
+        # only run that explains it.
+        suite_unfinished = status in INCOMPLETE_STATUSES or status not in {"", "completed"}
+        if suite_unfinished:
+            if not any(unfinished(run) for run in visible_members + ignored_members):
+                add(Finding("pending", name, f"status={status or 'unknown'}{event_note}", url, event, run_id), "workflow-run")
             continue
-        if empty and conclusion in BLOCKING_CONCLUSIONS:
+        if conclusion in BLOCKING_CONCLUSIONS and not any(blocking(run) for run in visible_members + ignored_members):
             add(Finding("failure", name, detail, url, event, run_id), "workflow-run")
             continue
         if empty and conclusion == "skipped":
@@ -298,6 +320,8 @@ def classify(
                 ),
                 "workflow-run",
             )
+        elif status in INCOMPLETE_STATUSES or status not in {"", "completed"}:
+            add(Finding("pending", name, f"status={status or 'unknown'}{event_note}", url, event, run_id), "workflow-run")
         elif conclusion in BLOCKING_CONCLUSIONS:
             add(Finding("failure", name, f"conclusion={conclusion}{event_note}", url, event, run_id), "workflow-run")
 
