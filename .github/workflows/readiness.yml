@@ -8,18 +8,34 @@ name: PR readiness
 #   jobs:
 #     readiness:
 #       uses: Wilkes-Liberty/shared-ci/.github/workflows/pr-readiness.yml@v1
+#       with:
+#         pr: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
+#         sha: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || '' }}
 #
-# check_suite is optional coverage for a Copilot-gated action_required
-# suite after jobs would otherwise look green. The job-level filter in
-# the reusable workflow prevents this caller from looping on its own
-# completion. Do not add logic here.
+# GitHub does not run check_suite workflows for suites created by
+# GitHub Actions. A review-triggered action_required suite therefore
+# re-enters through workflow_run after the named workflow completes.
+# This file is not in that list. workflow_run executes on the default
+# branch and inspects the triggering head SHA; it does not post a new
+# check onto the pull request. A manual run must pass a pull request
+# number or a head SHA. Do not add logic here.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  check_suite:
+  workflow_run:
+    workflows: [Agent perspective]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to inspect
+        required: false
+        type: string
+      sha:
+        description: Head SHA to inspect when no pull request number is given
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -30,3 +46,6 @@ permissions:
 jobs:
   readiness:
     uses: ./.github/workflows/pr-readiness.yml
+    with:
+      pr: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
+      sha: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || '' }}

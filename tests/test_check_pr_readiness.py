@@ -54,8 +54,8 @@ def suite(suite_id, conclusion="success", status="completed", check_runs=1, **ex
 
 
 def workflow(run_id, suite_id, event="pull_request", conclusion="success",
-             status="completed", name="CI", actor="jmcerda"):
-    return {
+             status="completed", name="CI", actor="jmcerda", path=""):
+    payload = {
         "id": run_id,
         "name": name,
         "event": event,
@@ -65,6 +65,9 @@ def workflow(run_id, suite_id, event="pull_request", conclusion="success",
         "html_url": f"https://github.com/example/project/actions/runs/{run_id}",
         "triggering_actor": {"login": actor},
     }
+    if path:
+        payload["path"] = path
+    return payload
 
 
 class ClassifyTests(unittest.TestCase):
@@ -195,6 +198,108 @@ class ClassifyTests(unittest.TestCase):
             [suite(1, "success", check_runs=1)],
             [],
             ignore_names=frozenset({"PR readiness"}),
+        )
+        self.assertEqual(verdict.kind, "success", verdict)
+
+    def test_skipped_check_run_id_does_not_suppress_workflow_run(self):
+        """Check-run 22 and workflow-run 22 are different resources."""
+        verdict = mod.classify(
+            [
+                check_run("lint", "success", id=1, suite_id=1),
+                check_run("assistant", "skipped", id=22, suite_id=1),
+            ],
+            [
+                suite(1, "success", check_runs=2),
+                suite(2, "action_required", check_runs=0),
+            ],
+            [
+                workflow(11, 1, "pull_request", "success", name="CI"),
+                workflow(
+                    22,
+                    2,
+                    "pull_request_review_comment",
+                    "action_required",
+                    name="Agent perspective",
+                    actor="Copilot",
+                ),
+            ],
+        )
+        self.assertEqual(verdict.kind, "action_required", verdict)
+        attention = [item for item in verdict.findings if item.kind == "action_required"]
+        self.assertEqual([item.run_id for item in attention], [22])
+        self.assertIn("no check-run entry", attention[0].detail)
+
+    def test_ignores_composite_readiness_check_and_own_workflow(self):
+        """`readiness / PR readiness` is this job; `readiness / lint` is not."""
+        verdict = mod.classify(
+            [
+                check_run("lint", "success", id=1, suite_id=1),
+                check_run("readiness / PR readiness", "failure", id=22, suite_id=2),
+                check_run("readiness / lint", "failure", id=23, suite_id=1),
+            ],
+            [
+                suite(1, "failure", check_runs=2),
+                suite(2, "failure", check_runs=1),
+            ],
+            [
+                workflow(11, 1, "pull_request", "failure", name="CI"),
+                workflow(
+                    22,
+                    2,
+                    "pull_request",
+                    "failure",
+                    name="PR readiness",
+                    path=".github/workflows/readiness.yml",
+                ),
+            ],
+            ignore_names=frozenset({"PR readiness", ".github/workflows/readiness.yml"}),
+        )
+        self.assertEqual(verdict.kind, "failure", verdict)
+        names = [item.name for item in verdict.findings]
+        self.assertIn("readiness / lint", names)
+        self.assertNotIn("readiness / PR readiness", names)
+        self.assertNotIn("PR readiness", names)
+
+    def test_in_progress_composite_readiness_check_is_not_pending(self):
+        verdict = mod.classify(
+            [
+                check_run("lint", "success", id=1, suite_id=1),
+                check_run(
+                    "readiness / PR readiness",
+                    conclusion=None,
+                    status="in_progress",
+                    id=9,
+                    suite_id=2,
+                ),
+            ],
+            [
+                suite(1, "success", check_runs=1),
+                suite(2, conclusion=None, status="in_progress", check_runs=1),
+            ],
+            [
+                workflow(4, 1, "pull_request", "success", name="CI"),
+                workflow(5, 2, status="in_progress", conclusion=None, name="PR readiness"),
+            ],
+            ignore_names=frozenset({"PR readiness"}),
+        )
+        self.assertEqual(verdict.kind, "success", verdict)
+
+    def test_app_name_is_kept_and_empty_workflow_does_not_hide_suite_name(self):
+        unnamed = suite(4, "action_required", check_runs=0, app_name="GitHub Actions")
+        self.assertEqual(mod.display_name(unnamed), "GitHub Actions")
+        self.assertEqual(mod.display_name({}), "")
+        named = suite(4, "action_required", check_runs=0, name="Agent perspective")
+        verdict = mod.classify([], [named], [{}])
+        self.assertEqual(verdict.kind, "action_required")
+        self.assertEqual(verdict.findings[0].name, "Agent perspective")
+
+    def test_ignore_suite_by_app_name(self):
+        unnamed = suite(4, "action_required", check_runs=0, app_name="Dependabot")
+        verdict = mod.classify(
+            [],
+            [unnamed],
+            [],
+            ignore_names=frozenset({"Dependabot"}),
         )
         self.assertEqual(verdict.kind, "success", verdict)
 
@@ -402,10 +507,31 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("python3 -I", source)
         self.assertIn("job.workflow_sha", source)
 
-    def test_caller_does_not_raise_untrusted_event_permissions(self):
+    def test_caller_reevaluates_on_workflow_run_without_write_or_self_trigger(self):
         source = (ROOT / ".github/workflows/readiness.yml").read_text()
         self.assertIn("contents: read", source)
         self.assertNotIn("contents: write", source)
         self.assertNotIn("actions: write", source)
-        self.assertIn("check_suite:", source)
+        self.assertNotIn("checks: write", source)
+        self.assertNotIn("check_suite:", source)
+        self.assertIn("workflow_dispatch:", source)
+        self.assertIn("pr:", source)
+        self.assertIn("sha:", source)
         self.assertIn("uses: ./.github/workflows/pr-readiness.yml", source)
+        filter_block = source.split("workflow_run:", 1)[1].split("types:", 1)[0]
+        self.assertIn("Agent perspective", filter_block)
+        self.assertNotIn("PR readiness", filter_block)
+        self.assertNotIn("readiness.yml", filter_block)
+
+    def test_reusable_workflow_reads_workflow_run_head_and_stays_read_only(self):
+        source = (ROOT / ".github/workflows/pr-readiness.yml").read_text()
+        self.assertIn("workflow_run.head_sha", source)
+        self.assertIn("workflow_run.conclusion", source)
+        self.assertIn("workflow_run.name != 'PR readiness'", source)
+        self.assertIn(".github/workflows/readiness.yml", source)
+        self.assertIn("inputs.pr", source)
+        self.assertIn("inputs.sha", source)
+        self.assertIn("action_required", source)
+        self.assertNotIn("contents: write", source)
+        self.assertNotIn("actions: write", source)
+        self.assertNotIn("checks: write", source)

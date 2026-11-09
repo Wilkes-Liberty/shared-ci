@@ -268,23 +268,33 @@ that contains it. Comment-event triggers are needed for comment coverage;
 Review and review-comment events from Copilot can create a completed
 `action_required` check suite before any jobs start. That suite has no
 check-run entry, so a check-run-only view looks successful or expected-skip
-while GitHub still reports an unstable merge state.
+while GitHub still reports an unstable merge state. GitHub does not run
+`check_suite` workflows for suites created by GitHub Actions, so the
+diagnostic re-runs from a `workflow_run` completion of the workflows a
+review can start. That re-check runs on the default branch, which is
+where `workflow_run` executes, and inspects the triggering head SHA. It
+does not post a new check onto the pull request.
 
 `check-pr-readiness.py` reads check runs, check suites and workflow runs for
 the pull request head. A pre-job `action_required` suite is a failure of this
 diagnostic, and the output names the review-triggered run that needs operator
 attention. Success and an expected skipped assistant job stay green; an
-actual failed job stays red.
+actual failed job stays red. The diagnostic ignores its own check, including
+the `caller / PR readiness` name GitHub records for a reusable workflow.
 
 This is diagnostics, not an approval gate. The job does not rerun or approve
 workflows. An operator rerun of the named run keeps existing invocation
 guards: lint jobs run, and an explicitly invoked assistant job stays skipped
 when no invocation is present. Untrusted-event permissions stay read-only;
 do not grant this workflow permission to authorize arbitrary workflow code.
+`workflow_run` can receive a privileged token. This caller does not use it
+to check out pull-request code.
 
-Run it locally with `python3 -I check-pr-readiness.py --pr 41`. This
-repository's reference caller is `.github/workflows/readiness.yml`. Other
-repositories pin the tag:
+Run it locally with `python3 -I check-pr-readiness.py --pr 41`. A manual
+run needs a pull request number or a head SHA. This repository's reference
+caller is `.github/workflows/readiness.yml`. Other repositories pin the tag
+and list their own review-triggered workflows, excluding this readiness
+workflow:
 
 ```yaml
 # .github/workflows/readiness.yml
@@ -292,8 +302,19 @@ name: PR readiness
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  check_suite:
+  workflow_run:
+    workflows: [Agent perspective]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to inspect
+        required: false
+        type: string
+      sha:
+        description: Head SHA to inspect when no pull request number is given
+        required: false
+        type: string
 permissions:
   contents: read
   checks: read
@@ -302,10 +323,14 @@ permissions:
 jobs:
   readiness:
     uses: Wilkes-Liberty/shared-ci/.github/workflows/pr-readiness.yml@v1
+    with:
+      pr: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
+      sha: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || '' }}
 ```
 
-The reusable workflow ignores `check_suite` completions other than
-`action_required`, so this job does not loop on its own result. Callers
+The reusable workflow runs that `workflow_run` job only when the completion
+is `action_required` and the triggering workflow is not this readiness
+workflow, so the diagnostic does not loop on its own result. Callers
 pinned at `@v1` pick the diagnostic up after that alias moves.
 
 ## Versioning

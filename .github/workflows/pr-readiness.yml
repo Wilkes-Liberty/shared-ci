@@ -20,13 +20,28 @@ name: PR readiness
 #     readiness:
 #       uses: Wilkes-Liberty/shared-ci/.github/workflows/pr-readiness.yml@v1
 #
-# Optional on the caller: `check_suite` types: [completed] with
-#   if: github.event_name != 'check_suite' || github.event.check_suite.conclusion == 'action_required'
-# so a Copilot-gated suite re-evaluates without looping on this job's own
-# completion. Do not add write permissions to "approve and run" that suite.
+# Callers re-evaluate with workflow_run, not check_suite. GitHub does
+# not deliver check_suite for suites created by GitHub Actions, which is
+# the review-triggered action_required shape this job exists to see.
+# The job runs that completion only when it is action_required and the
+# triggering workflow is not this readiness workflow. workflow_run can
+# carry a privileged token; this job still only reads. It fetches the
+# script from job.workflow_sha and does not check out the pull request.
+# Do not add write permissions to approve or rerun the waiting workflow.
 
 on:
   workflow_call:
+    inputs:
+      pr:
+        description: Pull request number. Empty falls back to the caller event.
+        type: string
+        required: false
+        default: ""
+      sha:
+        description: Commit SHA to inspect. Empty falls back to the caller event.
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -38,8 +53,18 @@ jobs:
   readiness:
     name: PR readiness
     if: |
-      github.event_name != 'check_suite' ||
-      github.event.check_suite.conclusion == 'action_required'
+      (
+        github.event_name != 'workflow_run' &&
+        github.event_name != 'check_suite'
+      ) || (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'action_required' &&
+        github.event.workflow_run.name != 'PR readiness' &&
+        github.event.workflow_run.path != '.github/workflows/readiness.yml'
+      ) || (
+        github.event_name == 'check_suite' &&
+        github.event.check_suite.conclusion == 'action_required'
+      )
     runs-on: ${{ fromJSON(github.event.repository.private && vars.CI_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 10
     steps:
@@ -67,7 +92,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.check_suite.pull_requests[0].number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.check_suite.head_sha }}
-          IGNORE_CHECK: PR readiness
+          PR: ${{ inputs.pr || github.event.inputs.pr || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.event.check_suite.pull_requests[0].number }}
+          HEAD_SHA: ${{ inputs.sha || github.event.inputs.sha || github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.event.check_suite.head_sha }}
+          IGNORE_CHECK: PR readiness,.github/workflows/readiness.yml
         run: python3 -I "$RUNNER_TEMP/trusted/check-pr-readiness.py"

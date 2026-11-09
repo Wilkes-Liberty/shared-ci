@@ -112,13 +112,25 @@ def actor_login(item: dict) -> str:
     return ""
 
 
+def app_name(item: dict) -> str:
+    app = item.get("app")
+    if isinstance(app, dict):
+        return _as_str(app.get("name"))
+    return _as_str(app)
+
+
 def display_name(item: dict) -> str:
+    """Return the item's own name, or "" when it has none.
+
+    Callers apply a generic label only after choosing between the workflow
+    and the suite. ``app.name`` is a string; wrapping it in ``_as_dict``
+    drops it and makes every unnamed suite look like "check suite".
+    """
     for key in ("name", "display_title"):
         name = _as_str(item.get(key))
         if name:
             return name
-    app = _as_str(_as_dict(_as_dict(item.get("app")).get("name")))
-    return app or "check suite"
+    return app_name(item)
 
 
 def item_url(item: dict) -> str:
@@ -130,7 +142,27 @@ def item_url(item: dict) -> str:
 
 
 def is_ignored(name: str, ignore_names: frozenset[str]) -> bool:
-    return name in ignore_names or name.casefold() in ignore_names
+    """Match a check name, a workflow path, or the called-job suffix.
+
+    Reusable-workflow checks are recorded as ``{caller job} / {called job}``.
+    An ignore token of ``PR readiness`` therefore matches
+    ``readiness / PR readiness`` and does not match ``readiness / lint``.
+    """
+    folded = name.casefold().strip()
+    if not folded:
+        return False
+    tokens = {token.casefold().strip() for token in ignore_names if token and token.strip()}
+    if folded in tokens:
+        return True
+    if " / " not in folded:
+        return False
+    return folded.rsplit(" / ", 1)[-1].strip() in tokens
+
+
+def matches_ignore(item: dict, ignore_names: frozenset[str]) -> bool:
+    return is_ignored(display_name(item), ignore_names) or is_ignored(
+        _as_str(item.get("path")), ignore_names
+    )
 
 
 def classify(
@@ -148,26 +180,25 @@ def classify(
     workflow_runs = list(workflow_runs or [])
     ignore_names = frozenset(ignore_names or ())
     findings: list[Finding] = []
-    seen_runs: set[int] = set()
+    # Check-run ids and workflow-run ids are different GitHub resources.
+    # A shared integer set lets check run 22 suppress workflow run 22.
+    seen_runs: set[tuple[str, int]] = set()
     seen_suites: set[int] = set()
+    suite_runs = [run for run in check_runs if isinstance(run, dict)]
 
     visible_runs = [
         run
-        for run in check_runs
-        if isinstance(run, dict) and not is_ignored(display_name(run), ignore_names)
-    ]
-    visible_suites = [
-        suite
-        for suite in check_suites
-        if isinstance(suite, dict) and not is_ignored(display_name(suite), ignore_names)
+        for run in suite_runs
+        if not matches_ignore(run, ignore_names)
     ]
 
-    def add(finding: Finding) -> None:
+    def add(finding: Finding, namespace: str) -> None:
         run_id = finding.run_id
         if run_id is not None:
-            if run_id in seen_runs:
+            key = (namespace, run_id)
+            if key in seen_runs:
                 return
-            seen_runs.add(run_id)
+            seen_runs.add(key)
         findings.append(finding)
 
     for run in visible_runs:
@@ -175,36 +206,44 @@ def classify(
         status = _as_str(run.get("status"))
         conclusion = _as_str(run.get("conclusion"))
         url = item_url(run)
+        run_id = _as_int(run.get("id"))
         if status in INCOMPLETE_STATUSES or status not in {"", "completed"}:
             if conclusion not in ATTENTION_CONCLUSIONS and status in WAITING_STATUSES:
-                add(Finding("action_required", name, f"status={status}", url, "", _as_int(run.get("id"))))
+                add(Finding("action_required", name, f"status={status}", url, "", run_id), "check-run")
             elif conclusion not in ATTENTION_CONCLUSIONS:
-                add(Finding("pending", name, f"status={status or 'unknown'}", url, "", _as_int(run.get("id"))))
+                add(Finding("pending", name, f"status={status or 'unknown'}", url, "", run_id), "check-run")
             continue
         if conclusion in BLOCKING_CONCLUSIONS:
-            add(Finding("failure", name, f"conclusion={conclusion}", url, "", _as_int(run.get("id"))))
+            add(Finding("failure", name, f"conclusion={conclusion}", url, "", run_id), "check-run")
         elif conclusion in ATTENTION_CONCLUSIONS:
-            add(Finding("action_required", name, f"conclusion={conclusion}", url, "", _as_int(run.get("id"))))
+            add(Finding("action_required", name, f"conclusion={conclusion}", url, "", run_id), "check-run")
         elif conclusion == "skipped":
-            add(Finding("expected_skip", name, "conclusion=skipped", url, "", _as_int(run.get("id"))))
+            add(Finding("expected_skip", name, "conclusion=skipped", url, "", run_id), "check-run")
         elif conclusion not in OK_CONCLUSIONS:
-            add(Finding("failure", name, f"conclusion={conclusion or 'missing'}", url, "", _as_int(run.get("id"))))
+            add(Finding("failure", name, f"conclusion={conclusion or 'missing'}", url, "", run_id), "check-run")
 
-    for suite in visible_suites:
+    for suite in check_suites:
+        if not isinstance(suite, dict):
+            continue
         suite_id = _as_int(suite.get("id"))
+        workflow = workflow_for_suite(suite, workflow_runs)
+        if matches_ignore(suite, ignore_names) or matches_ignore(workflow, ignore_names):
+            if suite_id is not None:
+                seen_suites.add(suite_id)
+            continue
         if suite_id is not None:
             seen_suites.add(suite_id)
-        workflow = workflow_for_suite(suite, workflow_runs)
         event = _as_str(workflow.get("event"))
         url = item_url(workflow) or item_url(suite)
         run_id = _as_int(workflow.get("id"))
-        name = display_name(workflow) or display_name(suite)
+        name = display_name(workflow) or display_name(suite) or "check suite"
         status = _as_str(suite.get("status")) or _as_str(workflow.get("status"))
         conclusion = _as_str(suite.get("conclusion")) or _as_str(workflow.get("conclusion"))
-        empty = run_count_for_suite(suite, visible_runs) == 0
+        run_count = run_count_for_suite(suite, suite_runs)
+        empty = run_count == 0
         review = event in REVIEW_EVENTS
         actor = actor_login(workflow)
-        empty_note = "no check-run entry" if empty else f"check-runs={run_count_for_suite(suite, visible_runs)}"
+        empty_note = "no check-run entry" if empty else f"check-runs={run_count}"
         who = f", actor={actor}" if actor else ""
         event_note = f", event={event}" if event else ""
         detail = f"conclusion={conclusion or 'none'}, {empty_note}{event_note}{who}"
@@ -215,25 +254,25 @@ def classify(
                     "completed action_required suite with no check-run entry"
                     f"{event_note}{who}"
                 )
-            add(Finding("action_required", name, detail, url, event, run_id))
+            add(Finding("action_required", name, detail, url, event, run_id), "workflow-run")
             continue
         if empty and (status in INCOMPLETE_STATUSES or status not in {"", "completed"}):
-            add(Finding("pending", name, f"status={status or 'unknown'}{event_note}", url, event, run_id))
+            add(Finding("pending", name, f"status={status or 'unknown'}{event_note}", url, event, run_id), "workflow-run")
             continue
         if empty and conclusion in BLOCKING_CONCLUSIONS:
-            add(Finding("failure", name, detail, url, event, run_id))
+            add(Finding("failure", name, detail, url, event, run_id), "workflow-run")
             continue
         if empty and conclusion == "skipped":
-            add(Finding("expected_skip", name, detail, url, event, run_id))
+            add(Finding("expected_skip", name, detail, url, event, run_id), "workflow-run")
         elif empty and conclusion not in OK_CONCLUSIONS and conclusion:
-            add(Finding("failure", name, detail, url, event, run_id))
+            add(Finding("failure", name, detail, url, event, run_id), "workflow-run")
         elif review and empty and not conclusion:
-            add(Finding("pending", name, f"review-triggered suite with no jobs{event_note}", url, event, run_id))
+            add(Finding("pending", name, f"review-triggered suite with no jobs{event_note}", url, event, run_id), "workflow-run")
 
     for workflow in workflow_runs:
         if not isinstance(workflow, dict):
             continue
-        if is_ignored(display_name(workflow), ignore_names):
+        if matches_ignore(workflow, ignore_names):
             continue
         suite_id = _as_int(workflow.get("check_suite_id"))
         if suite_id is not None and suite_id in seen_suites:
@@ -241,7 +280,7 @@ def classify(
         status = _as_str(workflow.get("status"))
         conclusion = _as_str(workflow.get("conclusion"))
         event = _as_str(workflow.get("event"))
-        name = display_name(workflow)
+        name = display_name(workflow) or "workflow run"
         url = item_url(workflow)
         run_id = _as_int(workflow.get("id"))
         actor = actor_login(workflow)
@@ -256,10 +295,11 @@ def classify(
                     url,
                     event,
                     run_id,
-                )
+                ),
+                "workflow-run",
             )
         elif conclusion in BLOCKING_CONCLUSIONS:
-            add(Finding("failure", name, f"conclusion={conclusion}{event_note}", url, event, run_id))
+            add(Finding("failure", name, f"conclusion={conclusion}{event_note}", url, event, run_id), "workflow-run")
 
     kinds = {item.kind for item in findings}
     if "failure" in kinds:
