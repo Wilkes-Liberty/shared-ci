@@ -453,6 +453,116 @@ class MergeAndEntryTest(unittest.TestCase):
         self.assertIn("Beta.", section)
         self.assertNotIn("baseline", section)
 
+    def _concurrent_base_advance(self, extra_pr_fragment=False):
+        """GitHub merge of a one-fragment PR after another fragment landed on the target.
+
+        Returns ``(event_base, pr_head)``. HEAD is left on the regenerated
+        merge commit: first parent is the newer target, second parent is the
+        PR tip. ``event_base`` is the older SHA a pull_request event can keep.
+        """
+        self.box.write("CHANGELOG.md", BASE)
+        event_base = self.box.commit_all("base")
+        self.box.git("branch", "pr-a")
+        self.box.git("branch", "pr-b")
+
+        self.box.git("checkout", "-q", "pr-a")
+        self.box.write(
+            "changelog.d/40-one.md",
+            fragment("Fixed", "This pull request's entry."),
+        )
+        if extra_pr_fragment:
+            self.box.write(
+                "changelog.d/40-two.md",
+                fragment("Fixed", "A second entry on the same pull request."),
+            )
+        pr_head = self.box.commit_all("this pull request")
+
+        self.box.git("checkout", "-q", "pr-b")
+        self.box.write(
+            "changelog.d/41-other.md",
+            fragment("Added", "Already merged elsewhere."),
+        )
+        self.box.commit_all("other pull request")
+        self.box.git("checkout", "-q", "master")
+        merged_other = self.box.git("merge", "--no-edit", "pr-b", check=False)
+        self.assertEqual(
+            merged_other.returncode, 0, merged_other.stdout + merged_other.stderr,
+        )
+
+        regenerated = self.box.git("merge", "--no-ff", "--no-edit", "pr-a", check=False)
+        self.assertEqual(
+            regenerated.returncode, 0, regenerated.stdout + regenerated.stderr,
+        )
+        parents = self.box.git("rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+        self.assertEqual(len(parents), 3, "GitHub merge commits have two parents")
+        self.assertEqual(parents[2], pr_head)
+        self.assertNotEqual(parents[1], event_base)
+        return event_base, pr_head
+
+    def test_concurrent_base_advance_counts_only_this_pull_request(self):
+        event_base, pr_head = self._concurrent_base_advance()
+        stale = self.box.run(
+            "check", "--enforce-fragments", "--base", event_base,
+        )
+        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
+        self.assertIn("added 2 fragment", stale.stdout)
+
+        rebound = self.box.run(
+            "check", "--enforce-fragments", "--base", event_base,
+            "--pr-head", pr_head,
+        )
+        self.assertEqual(rebound.returncode, 0, rebound.stdout + rebound.stderr)
+        labelled = self.box.run(
+            "check", "--require-entry", "--base", event_base,
+            "--pr-head", pr_head,
+        )
+        self.assertEqual(labelled.returncode, 0, labelled.stdout + labelled.stderr)
+
+    def test_concurrent_base_advance_still_rejects_two_fragments(self):
+        event_base, pr_head = self._concurrent_base_advance(extra_pr_fragment=True)
+        result = self.box.run(
+            "check", "--enforce-fragments", "--base", event_base,
+            "--pr-head", pr_head,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("added 2 fragment", result.stdout)
+
+    def test_merge_of_target_into_pr_is_not_rebound(self):
+        self.box.write("CHANGELOG.md", BASE)
+        event_base = self.box.commit_all("base")
+        self.box.git("branch", "pr-a")
+        self.box.git("branch", "pr-b")
+
+        self.box.git("checkout", "-q", "pr-a")
+        self.box.write(
+            "changelog.d/40-one.md",
+            fragment("Fixed", "This pull request's entry."),
+        )
+        self.box.commit_all("this pull request")
+
+        self.box.git("checkout", "-q", "pr-b")
+        self.box.write(
+            "changelog.d/41-other.md",
+            fragment("Added", "Already merged elsewhere."),
+        )
+        self.box.commit_all("other pull request")
+        self.box.git("checkout", "-q", "master")
+        self.box.git("merge", "--no-edit", "pr-b")
+
+        self.box.git("checkout", "-q", "pr-a")
+        self.box.git("merge", "--no-edit", "master")
+        pr_head = self.box.git("rev-parse", "HEAD").stdout.strip()
+        parents = self.box.git("rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+        self.assertEqual(len(parents), 3)
+        self.assertNotEqual(parents[2], pr_head)
+
+        result = self.box.run(
+            "check", "--require-entry", "--base", event_base,
+            "--pr-head", pr_head,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("added 2 fragment", result.stdout)
+
 
 class AdoptionSafetyTest(unittest.TestCase):
     """Failure modes: lost notes, unsafe paths, policy bypass and new formats."""
