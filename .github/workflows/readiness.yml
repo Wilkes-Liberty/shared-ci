@@ -1,0 +1,51 @@
+name: PR readiness
+
+# Reference caller for the shared readiness diagnostic. The implementation
+# lives in pr-readiness.yml and check-pr-readiness.py. This file uses a
+# relative path so the reference exercises the commit under test. Other
+# repositories call the tagged copy:
+#
+#   jobs:
+#     readiness:
+#       uses: Wilkes-Liberty/shared-ci/.github/workflows/pr-readiness.yml@v1
+#       with:
+#         pr: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
+#         sha: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || '' }}
+#
+# GitHub does not run check_suite workflows for suites created by
+# GitHub Actions. A review-triggered action_required suite therefore
+# re-enters through workflow_run after the named workflow completes.
+# This file is not in that list. workflow_run executes on the default
+# branch and inspects the triggering head SHA; it does not post a new
+# check onto the pull request. A manual run must pass a pull request
+# number or a head SHA. Do not add logic here.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_run:
+    workflows: [Agent perspective]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to inspect
+        required: false
+        type: string
+      sha:
+        description: Head SHA to inspect when no pull request number is given
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  readiness:
+    uses: ./.github/workflows/pr-readiness.yml
+    with:
+      pr: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || '' }}
+      sha: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || '' }}
