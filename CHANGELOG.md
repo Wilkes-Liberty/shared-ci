@@ -4,6 +4,30 @@ All notable changes to shared-ci. One entry per merged PR.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-12
+
+### Added
+- Add a default-off archive-correction transaction with an immutable hash-only
+  manifest and one ordinary fragment. Require exact unlisted history, pending
+  content and heading retention without weakening normal compilation. Keep raw
+  archive line endings during later compilation, and avoid echoing removed
+  content in correction diagnostics. Corrections remain explicit review decisions;
+  they do not purge existing tags or published artifacts.
+
+### Fixed
+- **Changelog comparison follows the regenerated merge commit's first parent when the pull_request event still carries an older base SHA.** Concurrent merges into the target no longer make a one-fragment pull request look like two. The one-fragment rule and trusted-script fetch are unchanged. (shared-ci#40)
+- **PR readiness diagnostics now inspect check-suite conclusions as well as
+  check runs.** A Copilot review or review-comment event can leave a
+  completed `action_required` suite with no check-run entry, so a
+  check-run-only view looked successful or expected-skip while GitHub still
+  reported an unstable merge state. The diagnostic names the
+  review-triggered run that needs operator attention, and the reference
+  caller re-checks when that workflow completes `action_required`. A
+  suite that is still running or has failed is reported even when its
+  check runs look successful. A `pending` or `requested` state stays
+  pending. An operator rerun keeps existing invocation guards; the job
+  does not approve waiting workflow runs. (shared-ci#41)
+
 ## [1.8.0] - 2026-10-30
 
 ### Changed
