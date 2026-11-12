@@ -89,6 +89,10 @@ on:
         description: Keep legacy release bodies unchanged while validating pending entries.
         type: boolean
         default: false
+      allow-history-corrections:
+        description: Accept an explicit immutable hash-manifested archive correction with one fragment.
+        type: boolean
+        default: false
       enforce-fragments:
         description: Reject direct changelog edits even when an entry is optional.
         type: boolean
@@ -194,6 +198,7 @@ jobs:
           FORMAT: ${{ inputs.changelog-format }}
           INITIAL: ${{ inputs.allow-initial-release }}
           PRESERVE: ${{ inputs.preserve-history }}
+          CORRECTIONS: ${{ inputs.allow-history-corrections }}
         run: |
           set -euo pipefail
           args=(python3 -I "$RUNNER_TEMP/trusted/changelog-fragments.py" check
@@ -203,6 +208,7 @@ jobs:
           if [ -n "$PR_HEAD" ]; then args+=(--pr-head "$PR_HEAD"); fi
           if [ "$INITIAL" = true ]; then args+=(--allow-initial-release); fi
           if [ "$PRESERVE" = true ]; then args+=(--preserve-history); fi
+          if [ "$CORRECTIONS" = true ]; then args+=(--allow-history-corrections); fi
           "${args[@]}"
 
 
@@ -247,6 +253,7 @@ jobs:
           FORMAT: ${{ inputs.changelog-format }}
           INITIAL: ${{ inputs.allow-initial-release }}
           PRESERVE: ${{ inputs.preserve-history }}
+          CORRECTIONS: ${{ inputs.allow-history-corrections }}
         run: |
           set -euo pipefail
           BASE="${PR_BASE:-${PUSH_BEFORE:-}}"
@@ -258,6 +265,7 @@ jobs:
           )
           if [ "$INITIAL" = true ]; then args+=(--allow-initial-release); fi
           if [ "$PRESERVE" = true ]; then args+=(--preserve-history); fi
+          if [ "$CORRECTIONS" = true ]; then args+=(--allow-history-corrections); fi
           # `before` is all zeros on a branch's first push; nothing to diff.
           # PR_HEAD lets the checker prefer the merge commit's first parent
           # when the event base SHA has lagged behind that merge.

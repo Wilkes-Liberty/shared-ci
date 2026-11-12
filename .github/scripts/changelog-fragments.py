@@ -33,13 +33,15 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Keep a Changelog 1.1.0 order. Callers append their own headings after these
 # with --extra-sections; they do not get to reorder the six.
@@ -167,7 +169,7 @@ def comparison_base(
 
 
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    return path.read_bytes().decode("utf-8")
 
 
 def fragment_filename_error(name: str) -> str | None:
@@ -477,7 +479,10 @@ def entry_errors(
     required: bool = True,
     allow_initial: bool = False,
     preserve_history: bool = False,
+    correction: bool = False,
 ) -> list[str]:
+    if correction:
+        return []
     diff = git(
         ["diff", "--name-status", "--find-renames", "-z", f"{base}...{head}"],
         cwd,
@@ -576,10 +581,227 @@ def entry_errors(
 
 
 def show_file(cwd: Path, rev: str, path: str) -> str | None:
-    shown = git(["show", f"{rev}:{path}"], cwd)
+    shown = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=cwd, capture_output=True)
     if shown.returncode != 0:
         return None
-    return shown.stdout
+    return shown.stdout.decode("utf-8")
+
+
+CORRECTIONS_DIR = "changelog.corrections"
+CORRECTION_NAME = re.compile(r"[0-9]+-[a-z0-9][a-z0-9-]*\.json")
+CORRECTION_HEADING = re.compile(
+    rf"## (?:\[(?:{SEMVER.pattern}|\d{{4}}-\d{{2}}-\d{{2}})\]|v{SEMVER.pattern})"
+    r"(?: - \d{4}-\d{2}-\d{2})?"
+)
+
+
+def correction_path(path: str) -> bool:
+    """Corrections use normalized repository paths, never filesystem aliases."""
+    pure = PurePosixPath(path)
+    return bool(path and not pure.is_absolute() and pure.as_posix() == path
+                and ".." not in pure.parts and "\\" not in path
+                and not any(ord(char) < 32 for char in path))
+
+
+def raw_git(cwd: Path, args: list[str]) -> bytes:
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
+    if result.returncode:
+        raise ValueError("cannot read correction comparison snapshots")
+    return result.stdout
+
+
+def correction_tree(cwd: Path, revision: str, paths: list[str]) -> dict[str, tuple[str, str]]:
+    """Read modes and object IDs without quoting or newline normalization."""
+    result = {}
+    for entry in raw_git(cwd, ["ls-tree", "-rz", "--full-tree", revision, "--", *paths]).split(b"\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.decode("ascii").split()
+        if kind != "blob":
+            raise ValueError("correction inputs must be ordinary files")
+        result[path.decode("utf-8")] = (mode, oid)
+    return result
+
+
+def correction_file(cwd: Path, path: str, entry: tuple[str, str]) -> bytes:
+    if entry[0] not in {"100644", "100755"}:
+        raise ValueError("correction inputs must not be symlinks")
+    location = cwd
+    for part in PurePosixPath(path).parts:
+        location = location / part
+        if location.is_symlink():
+            raise ValueError("correction input paths must not contain symlinks")
+    raw = raw_git(cwd, ["cat-file", "blob", entry[1]])
+    if not location.is_file() or location.read_bytes() != raw:
+        raise ValueError("correction inputs must match the checked commit")
+    return raw
+
+
+def no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate correction manifest field")
+        result[key] = value
+    return result
+
+
+def correction_manifest(raw: bytes, fragments: str | None) -> dict:
+    """Validate hash-only intent without including rejected values in errors."""
+    if len(raw) > 65536:
+        raise ValueError("correction manifest exceeds the size limit")
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicate_keys)
+    except (ValueError, UnicodeError):
+        raise ValueError("invalid correction manifest JSON") from None
+    fields = {"schema", "reason", "fragment", "releases"}
+    if not isinstance(data, dict) or set(data) != fields:
+        raise ValueError("invalid correction manifest fields")
+    if type(data["schema"]) is not int or data["schema"] != 1:
+        raise ValueError("unsupported correction manifest schema")
+    if data["reason"] != "internal-reference-removal":
+        raise ValueError("unsupported correction reason code")
+    fragment = data["fragment"]
+    if not isinstance(fragment, str) or not correction_path(fragment):
+        raise ValueError("invalid correction fragment path")
+    if (fragments is not None and not is_fragment_path(fragment, fragments)) or not re.fullmatch(r"[0-9]+-[A-Za-z0-9._-]+\.md", Path(fragment).name):
+        raise ValueError("correction fragment must use a public numeric issue identifier")
+    entries = data["releases"]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
+        raise ValueError("correction must identify one to thirty-two archives")
+    headings = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"heading", "before_sha256", "after_sha256"}:
+            raise ValueError("invalid correction archive fields")
+        heading = entry["heading"]
+        if not isinstance(heading, str) or CORRECTION_HEADING.fullmatch(heading) is None or heading in headings:
+            raise ValueError("invalid or duplicate correction archive heading")
+        headings.add(heading)
+        hashes = [entry["before_sha256"], entry["after_sha256"]]
+        if any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{64}", value) is None for value in hashes):
+            raise ValueError("invalid correction archive hash")
+        if hashes[0] == hashes[1]:
+            raise ValueError("correction archive hashes must describe a change")
+    return data
+
+
+def raw_sections(raw: bytes) -> list[tuple[str, int, int]]:
+    """A span starts at its H2 byte and ends immediately before the next H2."""
+    starts = []
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        if line.startswith(b"## "):
+            starts.append((line.rstrip(b"\r\n").decode("utf-8"), offset))
+        offset += len(line)
+    return [(heading, start, starts[index + 1][1] if index + 1 < len(starts) else len(raw))
+            for index, (heading, start) in enumerate(starts)]
+
+
+def correction_transaction(
+    cwd: Path, base: str, head: str, changelog: str, fragments: str,
+    allowed: list[str], style: str, enabled: bool,
+) -> tuple[bool, list[str]]:
+    """Recognize one explicit archive correction; normal compiles stay separate.
+
+    An intent is an auditable exception, not proof of semantic justification.
+    Existing manifests are immutable, even when the opt-in is later removed.
+    """
+    try:
+        if not enabled:
+            old_audit = correction_tree(cwd, base, [CORRECTIONS_DIR])
+            new_audit = correction_tree(cwd, head, [CORRECTIONS_DIR])
+            if not old_audit and not new_audit:
+                return False, []
+        paths = [changelog, fragments, CORRECTIONS_DIR]
+        if not all(correction_path(path) for path in paths):
+            raise ValueError("correction comparison requires normalized repository paths")
+        old_tree = correction_tree(cwd, base, paths)
+        new_tree = correction_tree(cwd, head, paths)
+        prefix = CORRECTIONS_DIR + "/"
+        old_manifests = {path: value for path, value in old_tree.items() if path.startswith(prefix)}
+        new_manifests = {path: value for path, value in new_tree.items() if path.startswith(prefix)}
+        if CORRECTIONS_DIR in old_tree or CORRECTIONS_DIR in new_tree:
+            raise ValueError("correction manifests require a real directory")
+        if any(new_manifests.get(path) != value for path, value in old_manifests.items()):
+            raise ValueError("existing correction manifests are immutable")
+        manifests = {}
+        for path, entry in new_manifests.items():
+            name = path[len(prefix):]
+            if CORRECTION_NAME.fullmatch(name) is None:
+                raise ValueError("invalid correction manifest filename")
+            manifests[path] = correction_manifest(
+                correction_file(cwd, path, entry), fragments if path not in old_manifests else None
+            )
+        added = set(new_manifests) - set(old_manifests)
+        if not enabled and added:
+            raise ValueError("history corrections require explicit opt-in")
+        if not enabled:
+            return False, []
+        if changelog not in old_tree or changelog not in new_tree:
+            raise ValueError("history correction needs an existing changelog")
+        if old_tree[changelog][0] not in {"100644", "100755"}:
+            raise ValueError("correction inputs must not be symlinks")
+        previous = raw_git(cwd, ["cat-file", "blob", old_tree[changelog][1]])
+        current = correction_file(cwd, changelog, new_tree[changelog])
+        previous.decode("utf-8")
+        current.decode("utf-8")
+        old_sections = raw_sections(previous)
+        new_sections = raw_sections(current)
+        if not added:
+            # A normal compile may add an archive, but every existing archive
+            # must remain byte-identical. Pending notes retain their old policy.
+            old_order = [title for title, _start, _end in old_sections
+                         if title != unreleased_heading(style)]
+            retained_order = [title for title, _start, _end in new_sections if title in old_order]
+            if retained_order != old_order:
+                raise ValueError("historical archive order must remain unchanged")
+            for heading, start, end in old_sections:
+                if heading == unreleased_heading(style):
+                    continue
+                matches = [(a, b) for title, a, b in new_sections if title == heading]
+                if len(matches) != 1 or previous[start:end] != current[matches[0][0]:matches[0][1]]:
+                    raise ValueError("historical changes require a new correction manifest")
+            return False, []
+        if len(added) != 1:
+            raise ValueError("a correction transaction adds exactly one manifest")
+        manifest = manifests[next(iter(added))]
+        fragment = manifest["fragment"]
+        fragment_prefix = fragments + "/"
+        old_fragments = {path: value for path, value in old_tree.items() if path.startswith(fragment_prefix)}
+        new_fragments = {path: value for path, value in new_tree.items() if path.startswith(fragment_prefix)}
+        if fragment in old_fragments or fragment not in new_fragments:
+            raise ValueError("a correction transaction needs one new ordinary fragment")
+        if new_fragments != {**old_fragments, fragment: new_fragments[fragment]}:
+            raise ValueError("correction cannot modify or consume other pending fragments")
+        fragment_raw = correction_file(cwd, fragment, new_fragments[fragment])
+        if isinstance(parse_fragment_text(fragment_raw.decode("utf-8"), Path(fragment).name, allowed), str):
+            raise ValueError("invalid correction fragment")
+        before_headers = [line for line in previous.splitlines(keepends=True) if re.match(rb"^#{1,6} ", line)]
+        after_headers = [line for line in current.splitlines(keepends=True) if re.match(rb"^#{1,6} ", line)]
+        if before_headers != after_headers:
+            raise ValueError("correction must preserve every heading and its order")
+        replacements = []
+        for entry in manifest["releases"]:
+            heading = entry["heading"]
+            before = [(a, b) for title, a, b in old_sections if title == heading]
+            after = [(a, b) for title, a, b in new_sections if title == heading]
+            if len(before) != 1 or len(after) != 1:
+                raise ValueError("correction archive must exist exactly once in both snapshots")
+            start, end = before[0]
+            replacement = current[after[0][0]:after[0][1]]
+            if hashlib.sha256(previous[start:end]).hexdigest() != entry["before_sha256"] or hashlib.sha256(replacement).hexdigest() != entry["after_sha256"]:
+                raise ValueError("correction archive hash does not match its snapshot")
+            replacements.append((start, end, replacement))
+        expected = previous
+        for start, end, replacement in sorted(replacements, reverse=True):
+            expected = expected[:start] + replacement + expected[end:]
+        if expected != current:
+            raise ValueError("correction changes unlisted history, pending content or preamble")
+        return True, []
+    except (ValueError, UnicodeError, OSError):
+        # Never echo removed text, malformed metadata values, or Git diagnostics.
+        return False, ["invalid history correction transaction; check intent, hashes, paths and unchanged history"]
 
 
 def partition_unreleased(
@@ -752,13 +974,20 @@ def cmd_check(args: argparse.Namespace) -> int:
             )
         else:
             errors.extend(deleted_heading_errors(previous, text, base))
+        correction, correction_errors = correction_transaction(
+            cwd, base, head, args.changelog, args.fragments, allowed,
+            args.format, args.allow_history_corrections,
+        )
+        errors.extend(correction_errors)
         if args.require_entry or args.enforce_fragments:
             errors.extend(
                 entry_errors(cwd, base, head, args.changelog, args.fragments,
-                             allowed, args.format, args.require_entry, args.allow_initial_release, args.preserve_history)
+                             allowed, args.format, args.require_entry, args.allow_initial_release,
+                             args.preserve_history, correction)
             )
-    elif args.require_entry or args.enforce_fragments:
-        print("error: --require-entry needs --base", file=sys.stderr)
+    elif args.require_entry or args.enforce_fragments or args.allow_history_corrections:
+        option = "--allow-history-corrections" if args.allow_history_corrections else "--require-entry"
+        print(f"error: {option} needs --base", file=sys.stderr)
         return 2
 
     return emit(errors, "Changelog fragments OK.")
@@ -818,7 +1047,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=changelog.parent,
+            mode="w", encoding="utf-8", newline="", dir=changelog.parent,
             prefix=f".{changelog.name}.", delete=False,
         ) as output:
             temporary = Path(output.name)
@@ -868,6 +1097,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--allow-initial-release", action="store_true")
     check.add_argument("--preserve-history", action="store_true",
                        help="validate pending sections without reformatting existing archives")
+    check.add_argument("--allow-history-corrections", action="store_true",
+                       help="accept a hash-manifested correction transaction; requires --base")
     check.set_defaults(func=cmd_check)
 
     for command in ("compile", "render"):

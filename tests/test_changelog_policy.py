@@ -57,3 +57,53 @@ class ChangelogPolicyTest(unittest.TestCase):
                                             text=True, capture_output=True)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(output.read_text(), "")
+
+
+class HistoryCorrectionWorkflowTest(unittest.TestCase):
+    def test_both_jobs_require_explicit_correction_opt_in_including_push(self):
+        import hashlib
+        import shutil
+        from test_changelog_fragments import BASE, Sandbox, fragment
+
+        source = (ROOT / ".github/workflows/changelog-fragments.yml").read_text()
+        for step_name, push in (("Require one fragment", False),
+                                ("Validate fragments and the changelog", False),
+                                ("Validate fragments and the changelog", True)):
+            with self.subTest(step=step_name, push=push):
+                box = Sandbox()
+                try:
+                    box.write("CHANGELOG.md", BASE)
+                    base = box.commit_all("initial archive")
+                    updated = BASE.replace("baseline that must survive compile byte for byte", "Reviewed public wording")
+                    heading = "## [0.1.0] - 2020-01-01"
+                    box.write("CHANGELOG.md", updated)
+                    box.write("changelog.d/44-correction.md", fragment("Fixed", "Correct earlier references."))
+                    manifest = {
+                        "schema": 1, "reason": "internal-reference-removal",
+                        "fragment": "changelog.d/44-correction.md",
+                        "releases": [{"heading": heading,
+                                      "before_sha256": hashlib.sha256(BASE[BASE.index(heading):].encode()).hexdigest(),
+                                      "after_sha256": hashlib.sha256(updated[updated.index(heading):].encode()).hexdigest()}],
+                    }
+                    box.write("changelog.corrections/44-correction.json", json.dumps(manifest))
+                    box.commit_all("correction candidate")
+                    runtime = box.root / "runtime"
+                    (runtime / "trusted").mkdir(parents=True)
+                    shutil.copy(ROOT / ".github/scripts/changelog-fragments.py", runtime / "trusted/changelog-fragments.py")
+                    box.write("hashlib.py", "raise RuntimeError('checkout module must not be imported')\n")
+                    block = source.split("      - name: " + step_name + "\n", 1)[1]
+                    block = block.split("\n      - name:", 1)[0]
+                    lines = block.split("        run: |\n", 1)[1].splitlines()
+                    script = "\n".join(line[10:] for line in lines if not line or line.startswith("          "))
+                    env = dict(os.environ, BASE=base, PR_BASE="" if push else base,
+                               PUSH_BEFORE=base, PR_HEAD=box.git("rev-parse", "HEAD").stdout.strip(),
+                               CHANGELOG="CHANGELOG.md", FRAGMENTS="changelog.d", EXTRA="",
+                               FORMAT="versioned", INITIAL="false", PRESERVE="true",
+                               ENFORCE="true", RUNNER_TEMP=str(runtime))
+                    for enabled, expected in (("false", 1), ("true", 0)):
+                        env["CORRECTIONS"] = enabled
+                        result = subprocess.run(["bash", "-c", script], env=env, cwd=box.repo,
+                                                text=True, capture_output=True)
+                        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                finally:
+                    box.cleanup()
