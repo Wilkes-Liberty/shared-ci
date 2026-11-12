@@ -9,6 +9,8 @@ rule accepts that shape instead of an edit to the shared list.
 Run: python3 -m unittest discover -s tests
 """
 
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -708,6 +710,309 @@ class AdoptionSafetyTest(unittest.TestCase):
         self.box.write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n")
         self.assertEqual(self.box.run("check").returncode, 1)
         result = self.box.run("check", "--allow-initial-release")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class HistoryCorrectionTest(unittest.TestCase):
+    """Audited exceptions must not permit unlisted historical changes."""
+
+    heading = "## [0.1.0] - 2020-01-01"
+    canary = "PRIVATE_CANARY_MUST_NOT_LEAK"
+    manifest_path = "changelog.corrections/44-history-correction.json"
+    fragment_path = "changelog.d/44-history-correction.md"
+
+    def setUp(self):
+        self.box = Sandbox()
+        self.before = BASE.replace(
+            "## [Unreleased]", "## [Unreleased]\n\n### Fixed\n- inherited pending note"
+        ).replace("baseline that must survive compile byte for byte", self.canary)
+        self.before += "\n## [0.0.1] - 2019-01-01\n\n### Added\n- older archive\n"
+        self.box.write("CHANGELOG.md", self.before)
+        self.box.write("changelog.d/43-existing.md", fragment("Fixed", "Existing fragment."))
+        self.base = self.box.commit_all("initial history")
+
+    def tearDown(self):
+        self.box.cleanup()
+
+    def archive(self, raw, heading=None):
+        start = raw.index((heading or self.heading).encode())
+        end = raw.find(b"\n## ", start)
+        return raw[start:] if end == -1 else raw[start:end + 1]
+
+    def prepare(self, key="44", raw=None):
+        before = (self.box.repo / "CHANGELOG.md").read_bytes()
+        after = raw if raw is not None else before.replace(self.canary.encode(), b"Reviewed public wording")
+        manifest = {
+            "schema": 1,
+            "reason": "internal-reference-removal",
+            "fragment": f"changelog.d/{key}-history-correction.md",
+            "releases": [{
+                "heading": self.heading,
+                "before_sha256": hashlib.sha256(self.archive(before)).hexdigest(),
+                "after_sha256": hashlib.sha256(self.archive(after)).hexdigest(),
+            }],
+        }
+        (self.box.repo / "CHANGELOG.md").write_bytes(after)
+        self.box.write(f"changelog.corrections/{key}-history-correction.json", json.dumps(manifest))
+        self.box.write(manifest["fragment"], fragment("Fixed", "Correct internal references in earlier notes."))
+        return manifest
+
+    def check(self, enabled=True, *extra):
+        args = ["check", "--base", self.base, "--enforce-fragments", "--preserve-history"]
+        if enabled:
+            args.append("--allow-history-corrections")
+        return self.box.run(*args, *extra)
+
+    def assertRejected(self, result):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn(self.canary, result.stdout + result.stderr)
+
+    def test_explicit_correction_passes_both_entry_and_structure_checks(self):
+        self.prepare()
+        self.box.commit_all("reviewed correction")
+        for extra in ((), ("--require-entry",)):
+            result = self.check(True, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_one_manifest_can_correct_two_archives_without_moving_pending_content(self):
+        manifest = self.prepare()
+        path = self.box.repo / "CHANGELOG.md"
+        raw = path.read_bytes().replace(b"older archive", b"Reviewed older wording")
+        heading = "## [0.0.1] - 2019-01-01"
+        manifest["releases"].append({
+            "heading": heading,
+            "before_sha256": hashlib.sha256(self.archive(self.before.encode(), heading)).hexdigest(),
+            "after_sha256": hashlib.sha256(self.archive(raw, heading)).hexdigest(),
+        })
+        path.write_bytes(raw)
+        self.box.write(self.manifest_path, json.dumps(manifest))
+        self.box.commit_all("two reviewed archive corrections")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_later_compile_preserves_corrected_crlf_archive_bytes(self):
+        raw = self.before.replace("\n", "\r\n").encode()
+        (self.box.repo / "CHANGELOG.md").write_bytes(raw)
+        self.base = self.box.commit_all("CRLF history")
+        self.prepare()
+        self.base = self.box.commit_all("accepted byte exact correction")
+        archive = self.archive((self.box.repo / "CHANGELOG.md").read_bytes())
+        compiled = self.box.run("compile", "--version", "0.2.0", "--date", "2026-11-12", "--preserve-history")
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.box.commit_all("ordinary release compile")
+        self.assertEqual(self.archive((self.box.repo / "CHANGELOG.md").read_bytes()), archive)
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_default_off_and_missing_transaction_parts_fail(self):
+        self.prepare()
+        self.box.commit_all("correction without opt in")
+        self.assertRejected(self.check(False))
+        for missing in (self.manifest_path, self.fragment_path):
+            with self.subTest(missing=missing):
+                self.box.git("reset", "--hard", self.base)
+                self.box.git("clean", "-fd")
+                self.prepare()
+                (self.box.repo / missing).unlink()
+                self.box.commit_all("missing correction part")
+                self.assertRejected(self.check())
+
+    def test_unlisted_preamble_pending_and_archive_bytes_are_immutable(self):
+        for old, new in (("# Changelog", "# Changed"),
+                         ("inherited pending note", "rewritten pending"),
+                         ("older archive", "rewritten old archive")):
+            with self.subTest(old=old):
+                self.box.git("reset", "--hard", self.base)
+                self.box.git("clean", "-fd")
+                self.prepare()
+                path = self.box.repo / "CHANGELOG.md"
+                path.write_bytes(path.read_bytes().replace(old.encode(), new.encode()))
+                self.box.commit_all("unlisted edit")
+                self.assertRejected(self.check())
+
+    def test_hash_schema_duplicate_and_unused_entries_fail_without_echoing_content(self):
+        for fault in ("before", "after", "unknown", "noop", "duplicate", "reason"):
+            with self.subTest(fault=fault):
+                self.box.git("reset", "--hard", self.base)
+                self.box.git("clean", "-fd")
+                manifest = self.prepare()
+                entry = manifest["releases"][0]
+                if fault in ("before", "after"):
+                    entry[fault + "_sha256"] = "0" * 64
+                elif fault == "unknown":
+                    manifest["unexpected"] = self.canary
+                elif fault == "noop":
+                    entry["after_sha256"] = entry["before_sha256"]
+                elif fault == "duplicate":
+                    manifest["releases"].append(dict(entry))
+                else:
+                    manifest["reason"] = self.canary
+                self.box.write(self.manifest_path, json.dumps(manifest))
+                self.box.commit_all("invalid manifest")
+                self.assertRejected(self.check())
+
+    def test_unused_manifest_and_multiple_manifests_fail(self):
+        self.prepare()
+        self.box.write("CHANGELOG.md", self.before)
+        self.box.commit_all("unused intent")
+        self.assertRejected(self.check())
+        self.box.git("reset", "--hard", self.base)
+        self.box.git("clean", "-fd")
+        manifest = self.prepare()
+        self.box.write("changelog.corrections/45-another.json", json.dumps(manifest))
+        self.box.commit_all("ambiguous intent")
+        self.assertRejected(self.check())
+
+    def test_release_and_section_headings_cannot_be_removed_or_changed(self):
+        for old, new in ((self.heading, "## [0.1.1] - 2020-01-01"),
+                         ("### Added", "### Changed")):
+            with self.subTest(old=old):
+                self.box.git("reset", "--hard", self.base)
+                self.box.git("clean", "-fd")
+                manifest = self.prepare()
+                path = self.box.repo / "CHANGELOG.md"
+                raw = path.read_bytes().replace(old.encode(), new.encode())
+                path.write_bytes(raw)
+                if old == self.heading:
+                    manifest["releases"][0]["heading"] = new
+                manifest["releases"][0]["after_sha256"] = hashlib.sha256(self.archive(raw, new if old == self.heading else self.heading)).hexdigest()
+                self.box.write(self.manifest_path, json.dumps(manifest))
+                self.box.commit_all("renamed heading")
+                self.assertRejected(self.check())
+
+    def test_symlinks_traversal_and_duplicate_json_keys_fail(self):
+        for fault in ("manifest", "directory", "fragment", "traversal", "duplicate_json"):
+            with self.subTest(fault=fault):
+                self.box.git("reset", "--hard", self.base)
+                self.box.git("clean", "-fd")
+                manifest = self.prepare()
+                path = self.box.repo / self.manifest_path
+                if fault == "manifest":
+                    path.unlink()
+                    path.symlink_to("../outside.json")
+                elif fault == "directory":
+                    shutil.rmtree(path.parent)
+                    path.parent.symlink_to("../outside")
+                elif fault == "fragment":
+                    path = self.box.repo / self.fragment_path
+                    path.unlink()
+                    path.symlink_to("../outside.md")
+                elif fault == "traversal":
+                    manifest["fragment"] = "../outside.md"
+                    self.box.write(self.manifest_path, json.dumps(manifest))
+                else:
+                    self.box.write(self.manifest_path, json.dumps(manifest).replace('"schema": 1', '"schema": 1, "schema": 1'))
+                self.box.commit_all("unsafe correction input")
+                self.assertRejected(self.check())
+
+    def test_existing_manifests_cannot_be_changed_or_deleted(self):
+        self.prepare()
+        self.base = self.box.commit_all("accepted correction")
+        for deleted in (False, True):
+            with self.subTest(deleted=deleted):
+                self.box.git("reset", "--hard", self.base)
+                path = self.box.repo / self.manifest_path
+                if deleted:
+                    path.unlink()
+                else:
+                    path.write_text("{}")
+                self.box.commit_all("alter previous audit record")
+                self.assertRejected(self.check())
+
+    def test_later_compile_consumes_fragment_and_retains_corrected_history(self):
+        self.prepare()
+        self.base = self.box.commit_all("accepted correction")
+        archive = self.archive((self.box.repo / "CHANGELOG.md").read_bytes())
+        compiled = self.box.run("compile", "--version", "0.2.0", "--date", "2026-11-12", "--preserve-history")
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.box.commit_all("ordinary release compile")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.archive((self.box.repo / "CHANGELOG.md").read_bytes()), archive)
+        self.assertTrue((self.box.repo / self.manifest_path).is_file())
+        self.assertFalse((self.box.repo / self.fragment_path).exists())
+
+    def test_correction_cannot_be_combined_with_release_compilation(self):
+        self.prepare()
+        self.box.commit_all("correction")
+        result = self.box.run("compile", "--version", "0.2.0", "--date", "2026-11-12", "--preserve-history")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.box.commit_all("mixed correction and compile")
+        self.assertRejected(self.check())
+
+    def test_second_correction_chains_from_latest_archive_hash(self):
+        self.prepare()
+        self.base = self.box.commit_all("first accepted correction")
+        raw = (self.box.repo / "CHANGELOG.md").read_bytes().replace(b"Reviewed public wording", b"Second reviewed wording")
+        self.prepare(key="45", raw=raw)
+        self.box.commit_all("second correction")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_raw_crlf_unicode_and_final_newline_are_preserved(self):
+        raw = self.before.replace("older archive", "older résumé").replace("\n", "\r\n").encode()
+        (self.box.repo / "CHANGELOG.md").write_bytes(raw)
+        self.base = self.box.commit_all("CRLF history")
+        self.prepare()
+        self.box.commit_all("byte exact correction")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path = self.box.repo / "CHANGELOG.md"
+        path.write_bytes(path.read_bytes().removesuffix(b"\r\n"))
+        self.box.commit_all("unlisted final newline change")
+        self.assertRejected(self.check())
+
+    def test_default_branch_push_still_requires_manifest_for_archive_changes(self):
+        self.prepare()
+        self.box.commit_all("valid correction")
+        result = self.box.run("check", "--base", self.base, "--allow-history-corrections", "--preserve-history")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (self.box.repo / self.manifest_path).unlink()
+        self.box.commit_all("remove intent")
+        self.assertRejected(self.box.run("check", "--base", self.base, "--allow-history-corrections", "--preserve-history"))
+
+    def test_calendar_and_rolling_archives_use_the_same_correction_contract(self):
+        for style in ("calendar", "rolling"):
+            with self.subTest(style=style):
+                self.box.git("reset", "--hard", self.base)
+                self.box.git("clean", "-fd")
+                self.heading = "## [2020-01-01]"
+                text = "# Changelog\n\n## " + ("Unreleased" if style == "rolling" else "[Unreleased]")
+                text += "\n\n" + self.heading + "\n\n### Added\n- " + self.canary + "\n"
+                self.box.write("CHANGELOG.md", text)
+                self.base = self.box.commit_all("calendar shaped history")
+                self.prepare()
+                self.box.commit_all("reviewed correction")
+                result = self.check(True, "--format", style)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_push_cannot_reorder_unmanifested_archive_spans(self):
+        raw = self.before.encode()
+        first = raw.index(self.heading.encode())
+        second = raw.index(b"## [0.0.1]")
+        (self.box.repo / "CHANGELOG.md").write_bytes(raw[:first] + raw[second:] + raw[first:second])
+        self.box.commit_all("unmanifested archive reorder")
+        self.assertRejected(self.box.run("check", "--base", self.base, "--allow-history-corrections", "--preserve-history"))
+
+    def test_historical_manifest_does_not_freeze_the_fragment_directory(self):
+        self.prepare()
+        self.box.commit_all("accepted correction")
+        self.assertEqual(self.box.run("compile", "--version", "0.2.0", "--date", "2026-11-12", "--preserve-history").returncode, 0)
+        self.base = self.box.commit_all("ordinary compile")
+        self.box.write("notes/45-new-note.md", fragment("Fixed", "A normal entry after changing the configured directory."))
+        self.box.commit_all("ordinary fragment in configured directory")
+        result = self.box.run("check", "--base", self.base, "--fragments", "notes", "--enforce-fragments", "--preserve-history")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_verified_merge_parent_excludes_unrelated_fragments(self):
+        self.box.git("checkout", "-b", "correction")
+        self.prepare()
+        pr_head = self.box.commit_all("correction PR")
+        self.box.git("checkout", "master")
+        self.box.write("changelog.d/46-unrelated.md", fragment("Added", "Unrelated committed fragment."))
+        self.box.commit_all("base advanced")
+        self.box.git("merge", "--no-edit", "correction")
+        result = self.check(True, "--pr-head", pr_head)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

@@ -167,6 +167,7 @@ Set `enforce-fragments: true` after adoption to reject direct edits to the share
 | `changelog-format` | `versioned` | `calendar` uses dated archives; `rolling` also accepts bare `## Unreleased`. |
 | `allow-initial-release` | `false` | Permit a versioned project with no published release yet. |
 | `preserve-history` | `false` | Validate pending sections without requiring old release bodies to follow current heading rules. |
+| `allow-history-corrections` | `false` | Accept one explicitly manifested archive correction plus one ordinary fragment. |
 
 `preserve-history` never permits a release compile to rewrite an archive. Existing handwritten unreleased notes are retained during adoption and included in the next compile. Correct malformed pending sections once, preserving their prose; do not reformat old releases.
 
@@ -177,6 +178,67 @@ python3 -I /tmp/changelog-fragments.py render --version 1.5.0 --date 2026-10-25
 ```
 
 Use the same `--format`, `--extra-sections`, `--allow-initial-release`, and `--preserve-history` options for check, render, and compile. Calendar and rolling formats omit `--version` and archive by `--date`. One compile owns each archive heading; two release-finalize PRs for the same version or day are not independent.
+
+#### Audited archive corrections
+
+An archive correction is a separate, explicitly reviewed transaction. It is not
+a release compile, semantic justification for changing a historical claim, or a
+purge of old Git objects, tags, release notes or published artifacts.
+
+After a shared-ci release containing this feature is available at `v1`, a caller
+may enable `allow-history-corrections: true`. It defaults to false. Keep
+`enforce-fragments: true` and `preserve-history: true`; neither flag is an escape
+hatch for archive edits. The CLI equivalent is `check --allow-history-corrections
+--enforce-fragments --preserve-history --base <comparison-commit>`.
+
+A correction pull request adds exactly one ordinary fragment and one manifest,
+for example `changelog.corrections/123-public-reference-correction.json`:
+
+```json
+{
+  "schema": 1,
+  "reason": "internal-reference-removal",
+  "fragment": "changelog.d/123-public-reference-correction.md",
+  "releases": [
+    {
+      "heading": "## [1.2.0] - 2026-01-01",
+      "before_sha256": "<64 lowercase hex characters from the base archive>",
+      "after_sha256": "<64 lowercase hex characters from the corrected archive>"
+    }
+  ]
+}
+```
+
+Replace the hash placeholders with real SHA-256 digests. An archive span begins
+at the first byte of its `## ` heading and ends immediately before the next
+`## ` heading, or at EOF. Include all line endings, blank lines and trailing
+whitespace. Hash raw UTF-8 bytes, without newline normalization. Ordinary
+compilation also preserves the existing archive bytes, including CRLF endings.
+
+The only supported reason code is `internal-reference-removal`. Manifest names
+and fragment basenames use a public numeric issue identifier. Do not put removed
+text, private tracker identifiers or private URLs in the manifest, fragment or
+pull request. The manifest records hashes and safe selectors, not old excerpts;
+correction diagnostics do not echo rejected metadata or archive content.
+
+Each selected archive must exist exactly once, retain every heading, and match
+both hashes. The checker reconstructs the candidate from the base plus exactly
+those archive replacements. Preamble, pending content, every other archive and
+all existing fragment files must remain unchanged. No-op or unused entries,
+multiple manifests, ambiguous selectors, unsafe paths, symlinks and corrections
+mixed with compilation fail. Both workflow jobs honor the opt-in; push validation
+also checks correction transactions without depending on a changelog label.
+
+Manifests are immutable and retained permanently. A subsequent correction adds
+a new manifest whose before-hash matches the latest corrected archive. A later
+ordinary compile consumes the correction fragment normally and retains its
+manifest. The historical fragment path stays recorded even after consumption or
+a deliberate change to the configured fragment directory.
+
+Use the normal maintainer review and release process for this exception. Release
+the shared implementation and verify `v1` before changing a consuming caller.
+The reusable workflow still fetches the checker from its own exact workflow
+commit; no caller-supplied script or additional write permission is introduced.
 
 #### Adoption and release protocol
 
